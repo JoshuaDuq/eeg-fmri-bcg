@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bcg-correction"
+version = "0.1.0"
+description = "BCGNet GRU and bundled AAS/PCA-OBS BCG correction for EEG-fMRI"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "easydict==1.13",
+    "matplotlib==3.11.1",
+    "mne==1.12.1",
+    "numpy>=2.0",
+    "pybv==0.8.1",
+    "pyyaml==6.0.3",
+    "scipy>=1.14",
+    "tabulate==0.9.0",
+    "tensorflow>=2.16,<2.20",
+]
+
+[project.scripts]
+bcgnet = "bcgnet.cli:main"
+bcg-correct = "bcg_correction.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.3",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["src/bcgnet/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bcgnet", "src/bcg_correction"]

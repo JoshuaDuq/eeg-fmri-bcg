@@ -1,0 +1,33 @@
+benchmark:
+  # This must be the FASTR scanner-gradient-corrected input derived from raw data.
+  # Its marker file may contain volume and stimulus markers, but no Pulse Artifact,R.
+  fastr_root: /data/fastr_gradient_corrected
+  # Analyzer's pre-BCG gradient-corrected input, including the markers it used.
+  analyzer_input_root: /data/analyzer_gradient_corrected
+  # The paired BrainVision Analyzer BCG-corrected export being challenged.
+  analyzer_output_root: /data/analyzer_bcg_reference
+  output_root: /data/bcg_benchmark
+  marker_tolerance_seconds: 0.05
+  correction_methods: [aas, pca_obs]
+  correction_window_seconds: [-0.2, 0.7]
+  ecg_to_bcg_delay_seconds: 0.210
+  aas_neighbor_count: 20
+  pca_obs_components: 4
+  null_surrogate_count: 20
+  random_seed: 20260826
+
+detector:
+  ecg_channel: ECG
+  # The corrected ECG in this study has a broad cardiac waveform. This low-frequency
+  # morphology band is locked for the study benchmark and must be validated on the
+  # target cohort before interpretation.
+  preprocessing_band_hz: [0.5, 10.0]
+  teager_emphasis_hz: 10.0
+  teager_smoothing_seconds: 0.028
+  template_window_seconds: [-0.2, 0.4]
+  minimum_rr_seconds: 0.4
+  maximum_rr_seconds: 2.0
+  candidate_refractory_seconds: 0.25
+  candidate_prominence_mad: 2.0
+  correlation_threshold: 0.5
+  refinement_iterations: 2

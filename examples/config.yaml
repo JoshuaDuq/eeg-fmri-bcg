@@ -1,0 +1,37 @@
+paths:
+  fastr_root: /path/to/fastr_python
+  eval_root: /path/to/fastr_python_bcg_gapfix
+  output_root: /path/to/fastr_python_bcgnet
+  eval_name: AAS
+
+compute:
+  workers: 2
+  cpu_count: 10
+  threads_per_worker: auto
+
+training:
+  # Paper YAML: num_epochs 2500, es_patience 25, batch_size 1.
+  num_epochs: 80
+  es_patience: 12
+  batch_size: 16
+  learning_rate: 0.001
+  random_seed: 1997
+  architecture: default_rnn_model
+  overwrite: true
+  resume: true
+  save_model: true
+  save_data: true
+  save_figures: true
+
+preprocess:
+  new_fs: 100
+  len_epoch: 3
+  mad_threshold: 5
+  per_training: 0.7
+  per_valid: 0.15
+  per_test: 0.15
+  ecg_channel: ECG
+
+subjects:
+  include: []
+  exclude: []

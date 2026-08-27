@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# Local tooling and operating-system artifacts.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.coverage
+htmlcov/
+
+# Study data and generated research outputs.
+data/
+outputs/
+results/
+*.eeg
+*.vhdr
+*.vmrk
+*.fif
+*.set
+*.mat
