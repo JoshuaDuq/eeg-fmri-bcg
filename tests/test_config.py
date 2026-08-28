@@ -94,5 +94,38 @@ def test_discover_lists_subject_folders(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path))
     subjects = discover_subjects(config)
     assert [spec["bids_id"] for spec in subjects] == ["sub-0000"]
-    assert subjects[0]["runs"][0]["idx"] == 1
-    assert "eval_vhdr" not in subjects[0]["runs"][0]
+    # The only recording here is a baseline, so it is not run 1 -- or any run.
+    (recording,) = subjects[0]["recordings"]
+    assert recording["label"] == "BaselineEEG"
+    assert recording["run"] is None
+    assert "eval_vhdr" not in recording
+
+
+def test_run_pattern_defaults_when_naming_is_absent(tmp_path: Path) -> None:
+    """An existing config predating the section keeps working unchanged."""
+    from bcgnet.discovery import DEFAULT_RUN_PATTERN
+
+    config = load_config(_write_config(tmp_path))
+    assert config.naming.run_pattern == DEFAULT_RUN_PATTERN
+
+
+def test_run_pattern_can_be_overridden(tmp_path: Path) -> None:
+    config = load_config(
+        _write_config(tmp_path, naming={"run_pattern": r"_S(\d+)_"})
+    )
+    assert config.naming.run_pattern == r"_S(\d+)_"
+
+
+def test_invalid_run_pattern_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="regular expression"):
+        load_config(_write_config(tmp_path, naming={"run_pattern": "run(["}))
+
+
+def test_run_pattern_without_a_capture_group_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="capture the run number"):
+        load_config(_write_config(tmp_path, naming={"run_pattern": r"run\d+"}))
+
+
+def test_unknown_naming_field_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="unknown field"):
+        load_config(_write_config(tmp_path, naming={"task_pattern": "x"}))

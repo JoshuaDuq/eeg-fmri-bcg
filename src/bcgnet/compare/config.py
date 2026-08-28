@@ -1,4 +1,4 @@
-"""YAML for running and/or comparing AAS and BCGNet."""
+"""YAML for running and/or comparing the bounded arms and BCGNet."""
 
 from __future__ import annotations
 
@@ -10,22 +10,50 @@ import yaml
 
 from bcg_correction.bcg_config import DetectorConfig
 
-from ..aas_batch import AasSettings
 from ..config import ConfigurationError
+from ..config import run_pattern as _run_pattern
+from ..correction_batch import CorrectionSettings
+from .arms import AAS, BCGNET, PCA_OBS, Arm
 
 
 @dataclass(frozen=True, slots=True)
 class ComparePaths:
     fastr_root: Path
     aas_root: Path
+    pca_obs_root: Path
     bcgnet_root: Path
     output_root: Path
+
+    def root_for(self, arm: Arm) -> Path:
+        """Return the folder holding ``arm``'s corrected recordings."""
+        roots = {
+            AAS.key: self.aas_root,
+            PCA_OBS.key: self.pca_obs_root,
+            BCGNET.key: self.bcgnet_root,
+        }
+        try:
+            return roots[arm.key]
+        except KeyError:
+            raise ValueError(f"no configured root for arm {arm.key!r}") from None
 
 
 @dataclass(frozen=True, slots=True)
 class RunFlags:
     aas: bool
+    pca_obs: bool
     bcgnet: bool
+
+    def enabled(self, arm: Arm) -> bool:
+        """Whether ``bcgnet compare`` should generate ``arm`` before plotting."""
+        flags = {
+            AAS.key: self.aas,
+            PCA_OBS.key: self.pca_obs,
+            BCGNET.key: self.bcgnet,
+        }
+        try:
+            return flags[arm.key]
+        except KeyError:
+            raise ValueError(f"no run flag for arm {arm.key!r}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,23 +68,32 @@ class PlotSettings:
 class CompareConfig:
     paths: ComparePaths
     run: RunFlags
-    aas: AasSettings
+    correction: CorrectionSettings
     bcgnet_config: Path | None
     plot: PlotSettings
     include: tuple[str, ...]
     exclude: tuple[str, ...]
+    #: Regex whose first group is the run number in a recording's filename.
+    run_pattern: str
 
 
-_TOP = frozenset({"paths", "run", "aas", "bcgnet_config", "plot", "subjects"})
-_PATH_KEYS = frozenset({"fastr_root", "aas_root", "bcgnet_root", "output_root"})
-_RUN_KEYS = frozenset({"aas", "bcgnet"})
+_TOP = frozenset(
+    {"paths", "run", "correction", "bcgnet_config", "plot", "subjects", "naming"}
+)
+# Keys that moved, so a pre-PCA-OBS config fails with the fix rather than a
+# bare "unknown field".
+_RENAMED = {"aas": "correction"}
+_PATH_KEYS = frozenset(
+    {"fastr_root", "aas_root", "pca_obs_root", "bcgnet_root", "output_root"}
+)
+_RUN_KEYS = frozenset({"aas", "pca_obs", "bcgnet"})
 _PLOT_KEYS = frozenset(
     {"channel", "epoch_start_seconds", "epoch_seconds", "psd_max_hz"}
 )
 _SUBJECT_KEYS = frozenset({"include", "exclude"})
-_AAS_KEYS = frozenset(
+_NAMING_KEYS = frozenset({"run_pattern"})
+_CORRECTION_KEYS = frozenset(
     {
-        "method",
         "window_seconds",
         "ecg_to_bcg_delay_seconds",
         "aas_neighbor_count",
@@ -97,12 +134,19 @@ def load_compare_config(path: str | Path) -> CompareConfig:
         ) from error
     if not isinstance(document, Mapping):
         raise ConfigurationError("configuration must be a mapping")
+    for old, new in _RENAMED.items():
+        if old in document:
+            raise ConfigurationError(
+                f"field {old!r} was renamed to {new!r}; the correction settings "
+                "are now shared by the aas and pca_obs arms, which are selected "
+                "by run flags instead of a method string"
+            )
     unknown = sorted(str(key) for key in document if key not in _TOP)
     if unknown:
         raise ConfigurationError(
             f"unknown field(s) in configuration: {', '.join(unknown)}"
         )
-    for key in ("paths", "run", "aas", "plot", "subjects"):
+    for key in ("paths", "run", "correction", "plot", "subjects"):
         if key not in document:
             raise ConfigurationError(f"missing required field: {key}")
 
@@ -115,10 +159,13 @@ def load_compare_config(path: str | Path) -> CompareConfig:
     _require_keys(plot, _PLOT_KEYS, "plot")
     subjects = _mapping(document["subjects"], "subjects")
     _require_keys(subjects, _SUBJECT_KEYS, "subjects")
-    aas = _mapping(document["aas"], "aas")
-    _require_keys(aas, _AAS_KEYS, "aas")
-    detector = _mapping(aas["detector"], "aas.detector")
-    _require_keys(detector, _DETECTOR_KEYS, "aas.detector")
+    # ``naming`` is optional, so adding it never invalidates an existing config.
+    naming = _mapping(document.get("naming", {}), "naming")
+    _reject_unknown_keys(naming, _NAMING_KEYS, "naming")
+    correction = _mapping(document["correction"], "correction")
+    _require_keys(correction, _CORRECTION_KEYS, "correction")
+    detector = _mapping(correction["detector"], "correction.detector")
+    _require_keys(detector, _DETECTOR_KEYS, "correction.detector")
 
     run_bcgnet = _bool(run, "bcgnet")
     bcgnet_config = document.get("bcgnet_config")
@@ -136,23 +183,29 @@ def load_compare_config(path: str | Path) -> CompareConfig:
 
     band = _two_floats(detector, "preprocessing_band_hz")
     template = _two_floats(detector, "template_window_seconds")
-    window = _two_floats(aas, "window_seconds")
+    window = _two_floats(correction, "window_seconds")
     return CompareConfig(
         paths=ComparePaths(
             fastr_root=_path(paths, "fastr_root", base),
             aas_root=_path(paths, "aas_root", base),
+            pca_obs_root=_path(paths, "pca_obs_root", base),
             bcgnet_root=_path(paths, "bcgnet_root", base),
             output_root=_path(paths, "output_root", base),
         ),
-        run=RunFlags(aas=_bool(run, "aas"), bcgnet=run_bcgnet),
-        aas=AasSettings(
-            method=_string(aas, "method"),
+        run=RunFlags(
+            aas=_bool(run, "aas"),
+            pca_obs=_bool(run, "pca_obs"),
+            bcgnet=run_bcgnet,
+        ),
+        correction=CorrectionSettings(
             window_seconds=window,
-            ecg_to_bcg_delay_seconds=float(aas["ecg_to_bcg_delay_seconds"]),
-            aas_neighbor_count=int(aas["aas_neighbor_count"]),
-            pca_obs_components=int(aas["pca_obs_components"]),
-            maximum_residual_ratio=float(aas["maximum_residual_ratio"]),
-            overwrite=_bool(aas, "overwrite"),
+            ecg_to_bcg_delay_seconds=float(
+                correction["ecg_to_bcg_delay_seconds"]
+            ),
+            aas_neighbor_count=int(correction["aas_neighbor_count"]),
+            pca_obs_components=int(correction["pca_obs_components"]),
+            maximum_residual_ratio=float(correction["maximum_residual_ratio"]),
+            overwrite=_bool(correction, "overwrite"),
             detector=DetectorConfig(
                 ecg_channel=_string(detector, "ecg_channel"),
                 preprocessing_band_hz=band,
@@ -182,6 +235,7 @@ def load_compare_config(path: str | Path) -> CompareConfig:
         ),
         include=_string_list(subjects, "include"),
         exclude=_string_list(subjects, "exclude"),
+        run_pattern=_run_pattern(naming),
     )
 
 
@@ -191,7 +245,7 @@ def _mapping(value: object, field: str) -> Mapping[str, object]:
     return value
 
 
-def _require_keys(
+def _reject_unknown_keys(
     values: Mapping[str, object], expected: frozenset[str], field: str
 ) -> None:
     unknown = sorted(str(key) for key in values if key not in expected)
@@ -199,6 +253,12 @@ def _require_keys(
         raise ConfigurationError(
             f"unknown field(s) in {field}: {', '.join(unknown)}"
         )
+
+
+def _require_keys(
+    values: Mapping[str, object], expected: frozenset[str], field: str
+) -> None:
+    _reject_unknown_keys(values, expected, field)
     for key in sorted(expected):
         if key not in values:
             raise ConfigurationError(f"missing required field: {field}.{key}")

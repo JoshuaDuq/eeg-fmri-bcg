@@ -1,17 +1,20 @@
-# Template: overlay FASTR vs AAS vs PCA-OBS vs BCGNet.
-# Copy to the repository root as compare.yaml and set the paths.
+# Study comparison configuration: FASTR vs AAS vs PCA-OBS vs BCGNet.
+# This is the live config for this study; examples/compare.yaml is the template.
+#   bcgnet aas      --config compare.yaml
+#   bcgnet pca-obs  --config compare.yaml
+#   bcgnet compare  --config compare.yaml
 #
 # Keep the run flags false unless you want `bcgnet compare` to generate an arm
-# first (same code paths as `bcgnet aas` / `bcgnet pca-obs` / `bcgnet run`).
+# first (same code paths as the standalone commands above).
 
 paths:
-  fastr_root: /path/to/fastr_python
-  # AAS writes *_fastr_bcg.vhdr here.
-  aas_root: /path/to/fastr_python_bcg
-  # PCA-OBS writes *_fastr_pcaobs.vhdr here.
-  pca_obs_root: /path/to/fastr_python_pcaobs
-  bcgnet_root: /path/to/fastr_python_bcgnet
-  output_root: /path/to/bcg_compare
+  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python
+  # AAS keeps the historical *_fastr_bcg.vhdr name in this folder.
+  aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcg_gapfix
+  # PCA-OBS writes *_fastr_pcaobs.vhdr, so the two arms never overwrite.
+  pca_obs_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_pcaobs
+  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
+  output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v2
 
 run:
   aas: false
@@ -19,7 +22,7 @@ run:
   bcgnet: false
 
 # Used only when run.bcgnet is true. A relative path resolves against the
-# folder holding this file.
+# folder holding this file, so this refers to ./config.yaml.
 bcgnet_config: config.yaml
 
 # Shared by the aas and pca_obs arms: one detector, one window, one delay, so
@@ -53,11 +56,3 @@ plot:
 subjects:
   include: []
   exclude: []
-
-# Optional. How run numbers are read out of recording filenames. The default
-# matches run1, run_2, run-02, RUN.3 and does not match "run" inside a longer
-# word. A recording whose name has no run token -- a baseline, say -- is still
-# trained on and still cleaned; it is simply not counted or plotted as a run,
-# and it is named after its own filename instead.
-# naming:
-#   run_pattern: 'run[ _.-]?(\d+)'

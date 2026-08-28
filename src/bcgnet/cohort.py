@@ -22,28 +22,38 @@ def discover_subjects(config: BCGNetConfig) -> list[dict]:
             f"paths.fastr_root is not a directory: {config.paths.fastr_root}"
         )
     subjects = []
-    for bids_id, str_sub, fastr in iter_subjects(
+    for bids_id, str_sub, recordings in iter_subjects(
         config.paths.fastr_root,
         include=config.subjects.include,
         exclude=config.subjects.exclude,
+        run_pattern=config.naming.run_pattern,
     ):
-        runs = []
-        for idx, src in enumerate(fastr, start=1):
-            runs.append(
-                {
-                    "idx": idx,
-                    "stem": src.stem,
-                    "fastr_vhdr": str(src),
-                }
-            )
         subjects.append(
             {
                 "bids_id": bids_id,
                 "str_sub": str_sub,
-                "runs": runs,
+                "recordings": [
+                    {
+                        "label": recording.label,
+                        "run": recording.run,
+                        "stem": recording.stem,
+                        "fastr_vhdr": str(recording.path),
+                    }
+                    for recording in recordings
+                ],
             }
         )
     return subjects
+
+
+def run_count(spec: dict) -> int:
+    """How many of a subject's recordings belong to the numbered run series.
+
+    Recordings without a run number -- a baseline or resting acquisition -- are
+    still trained on and still cleaned; they are simply not runs, so counting
+    them here would report a run the study never acquired.
+    """
+    return sum(1 for item in spec["recordings"] if item["run"] is not None)
 
 
 def _rewrite_vhdr(src_vhdr: Path, dst_vhdr: Path) -> None:
@@ -62,14 +72,28 @@ def _rewrite_vhdr(src_vhdr: Path, dst_vhdr: Path) -> None:
         os.symlink(src, dst)
 
 
+#: Staged filenames carry the recording label, so ``vec_idx_run`` can hand the
+#: vendor Session a label instead of a position. It only ever formats the value
+#: into a path and prints it, never does arithmetic on it.
+STAGED_NAMING_FORMAT = "{}_{}_raw"
+
+
+def staged_vhdr(output_root: Path, str_sub: str, label: str) -> Path:
+    return (
+        output_root
+        / "staged"
+        / "raw_data"
+        / str_sub
+        / f"{STAGED_NAMING_FORMAT.format(str_sub, label)}.vhdr"
+    )
+
+
 def stage_subject(spec: dict, output_root: Path) -> None:
     str_sub = spec["str_sub"]
-    raw_dir = output_root / "staged" / "raw_data" / str_sub
-    for run in spec["runs"]:
-        idx = run["idx"]
+    for recording in spec["recordings"]:
         _rewrite_vhdr(
-            Path(run["fastr_vhdr"]),
-            raw_dir / f"{str_sub}_r0{idx}_raw.vhdr",
+            Path(recording["fastr_vhdr"]),
+            staged_vhdr(output_root, str_sub, recording["label"]),
         )
 
 
@@ -124,8 +148,16 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         "bids_id": bids_id,
         "str_sub": str_sub,
         "status": "error",
-        "n_runs": len(spec["runs"]),
-        "runs": [{"idx": run["idx"], "stem": run["stem"]} for run in spec["runs"]],
+        "n_runs": run_count(spec),
+        "n_recordings": len(spec["recordings"]),
+        "recordings": [
+            {
+                "label": recording["label"],
+                "run": recording["run"],
+                "stem": recording["stem"],
+            }
+            for recording in spec["recordings"]
+        ],
     }
     output_root = config.paths.output_root
     results_dir = output_root / "results"
@@ -184,6 +216,7 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         vendor_cfg.per_valid = config.preprocess.per_valid
         vendor_cfg.per_test = config.preprocess.per_test
         vendor_cfg.str_ecg_channel = config.preprocess.ecg_channel
+        vendor_cfg.input_file_naming_format = STAGED_NAMING_FORMAT
 
         import tensorflow as tf
 
@@ -195,9 +228,12 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         except RuntimeError:
             pass
 
-        vec_idx_run = [run["idx"] for run in spec["runs"]]
+        vec_idx_run = [
+            recording["label"] for recording in spec["recordings"]
+        ]
         print(
-            f"=== {bids_id} runs={vec_idx_run} tf={tf.__version__} "
+            f"=== {bids_id} recordings={vec_idx_run} "
+            f"runs={run_count(spec)} tf={tf.__version__} "
             f"threads={config.compute.threads_per_worker} "
             f"epochs={config.training.num_epochs} batch={config.training.batch_size}"
         )
@@ -218,11 +254,14 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         session.evaluate(mode="test")
 
         metrics = []
-        for dataset, run in zip(session.vec_dataset, spec["runs"], strict=True):
+        for dataset, recording in zip(
+            session.vec_dataset, spec["recordings"], strict=True
+        ):
             rms = dataset.rms_results.get("test")
             row = {
-                "idx_run": dataset.idx_run,
-                "stem": run["stem"],
+                "label": recording["label"],
+                "run": recording["run"],
+                "stem": recording["stem"],
                 "n_good": len(dataset.vec_idx_good_epochs),
             }
             if rms is not None:
@@ -242,31 +281,29 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
             from .figures import plot_before_after_psd
 
             fig_dir = output_root / "figures" / str_sub
-            for dataset, run in zip(
-                session.vec_dataset, spec["runs"], strict=True
+            for dataset, recording in zip(
+                session.vec_dataset, spec["recordings"], strict=True
             ):
                 cleaned = (
                     dataset.orig_cleaned_dataset
                     if dataset.resampled
                     else dataset.cleaned_dataset
                 )
+                source = Path(recording["fastr_vhdr"])
+                label = recording["label"]
                 if config.training.save_data:
                     write_bcgnet_recording(
                         cleaned,
-                        Path(run["fastr_vhdr"]),
-                        bcgnet_output_vhdr(
-                            output_root, bids_id, Path(run["fastr_vhdr"])
-                        ),
+                        source,
+                        bcgnet_output_vhdr(output_root, bids_id, source),
                         overwrite=config.training.overwrite,
                     )
                 if config.training.save_figures:
                     plot_before_after_psd(
-                        load_fastr(Path(run["fastr_vhdr"])),
+                        load_fastr(source),
                         cleaned,
-                        title=(
-                            f"{bids_id} run {dataset.idx_run} before vs after"
-                        ),
-                        output=fig_dir / f"psd_run{dataset.idx_run}_avg.png",
+                        title=f"{bids_id} {label} before vs after",
+                        output=fig_dir / f"psd_{label}_avg.png",
                     )
         if config.training.save_figures:
             fig_dir = output_root / "figures" / str_sub
@@ -324,7 +361,8 @@ def write_cohort_summary(results: list[dict], output_root: Path) -> Path:
                 {
                     "bids_id": result["bids_id"],
                     "status": result["status"],
-                    "idx_run": metric.get("idx_run"),
+                    "label": metric.get("label"),
+                    "run": metric.get("run"),
                     "stem": metric.get("stem"),
                     "n_good": metric.get("n_good"),
                     "end_epoch": result.get("end_epoch"),
@@ -373,7 +411,10 @@ def run_cohort(config: BCGNetConfig, config_path: Path) -> list[dict]:
         f"threads/worker={config.compute.threads_per_worker}"
     )
     for spec in subjects:
-        print(f"  {spec['bids_id']}: {len(spec['runs'])} runs")
+        print(
+            f"  {spec['bids_id']}: {run_count(spec)} runs, "
+            f"{len(spec['recordings'])} recordings"
+        )
     results: list[dict] = []
     with ProcessPoolExecutor(max_workers=config.compute.workers) as pool:
         futures = {

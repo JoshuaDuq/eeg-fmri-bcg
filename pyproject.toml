@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bcg-correction"
 version = "0.1.0"
-description = "BCGNet GRU correction for EEG-fMRI, with bundled AAS for comparison"
+description = "BCGNet GRU correction for EEG-fMRI, with bundled AAS and PCA-OBS comparators"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

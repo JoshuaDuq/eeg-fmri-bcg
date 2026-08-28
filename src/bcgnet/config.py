@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 
 import yaml
+
+from .discovery import DEFAULT_RUN_PATTERN
 
 
 class ConfigurationError(ValueError):
@@ -61,15 +64,31 @@ class SubjectConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NamingConfig:
+    """How recording filenames are read.
+
+    :param run_pattern: regex whose first group is the run number. A recording
+        whose filename does not match is not part of the numbered series.
+    """
+
+    run_pattern: str
+
+
+@dataclass(frozen=True, slots=True)
 class BCGNetConfig:
     paths: PathConfig
     compute: ComputeConfig
     training: TrainingConfig
     preprocess: PreprocessConfig
     subjects: SubjectConfig
+    naming: NamingConfig
 
 
-_TOP = frozenset({"paths", "compute", "training", "preprocess", "subjects"})
+_TOP = frozenset(
+    {"paths", "compute", "training", "preprocess", "subjects", "naming"}
+)
+#: Sections a configuration may omit, so adding one never breaks an existing file.
+_OPTIONAL_TOP = frozenset({"naming"})
 _PATH_KEYS = frozenset({"fastr_root", "output_root"})
 _COMPUTE_KEYS = frozenset({"workers", "cpu_count", "threads_per_worker"})
 _TRAINING_KEYS = frozenset(
@@ -99,6 +118,7 @@ _PREPROCESS_KEYS = frozenset(
     }
 )
 _SUBJECT_KEYS = frozenset({"include", "exclude"})
+_NAMING_KEYS = frozenset({"run_pattern"})
 
 
 def load_config(path: str | Path) -> BCGNetConfig:
@@ -116,7 +136,7 @@ def load_config(path: str | Path) -> BCGNetConfig:
 
     root = _mapping(document, "configuration")
     _reject_unknown(root, _TOP, "configuration")
-    _require(root, _TOP, "configuration")
+    _require(root, _TOP - _OPTIONAL_TOP, "configuration")
     base = config_path.parent
 
     paths = _section(root, "paths", _PATH_KEYS)
@@ -124,6 +144,7 @@ def load_config(path: str | Path) -> BCGNetConfig:
     training = _section(root, "training", _TRAINING_KEYS)
     preprocess = _section(root, "preprocess", _PREPROCESS_KEYS)
     subjects = _section(root, "subjects", _SUBJECT_KEYS)
+    naming = _section(root, "naming", _NAMING_KEYS)
 
     workers = _integer(compute, "workers", minimum=1)
     cpu_count = _integer(compute, "cpu_count", minimum=1)
@@ -180,7 +201,27 @@ def load_config(path: str | Path) -> BCGNetConfig:
             include=_string_list(subjects, "include"),
             exclude=_string_list(subjects, "exclude"),
         ),
+        naming=NamingConfig(run_pattern=run_pattern(naming)),
     )
+
+
+def run_pattern(naming: Mapping[str, object]) -> str:
+    """Validate ``naming.run_pattern``, falling back to the default spelling."""
+    if "run_pattern" not in naming:
+        return DEFAULT_RUN_PATTERN
+    pattern = _string(naming, "run_pattern")
+    try:
+        compiled = re.compile(pattern)
+    except re.error as error:
+        raise ConfigurationError(
+            f"naming.run_pattern is not a valid regular expression: {error}"
+        ) from error
+    if compiled.groups < 1:
+        raise ConfigurationError(
+            "naming.run_pattern must capture the run number in a group, "
+            r"e.g. 'run[_-]?(\d+)'"
+        )
+    return pattern
 
 
 def _section(
@@ -188,9 +229,13 @@ def _section(
     name: str,
     expected: frozenset[str],
 ) -> Mapping[str, object]:
+    if name in _OPTIONAL_TOP and name not in root:
+        return {}
     values = _mapping(root[name], name)
     _reject_unknown(values, expected, name)
     required = expected
+    if name in _OPTIONAL_TOP:
+        required = frozenset()
     if name == "compute":
         required = expected - {"threads_per_worker"}
         if "threads_per_worker" not in values:

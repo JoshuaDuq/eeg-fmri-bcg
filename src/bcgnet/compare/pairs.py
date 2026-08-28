@@ -1,46 +1,74 @@
-"""Match FASTR, AAS, and BCGNet outputs for one recording."""
+"""Match one FASTR recording to whichever corrected arms exist on disk."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..aas_batch import aas_output_vhdr
+from ..correction_batch import correction_output_vhdr
 from ..discovery import iter_subjects
 from ..export import bcgnet_output_vhdr
+from .arms import BCGNET, CLEAN_ARMS, Arm
 from .config import CompareConfig
 
 
 @dataclass(frozen=True, slots=True)
-class RecordingTriple:
+class RecordingSet:
+    """One FASTR recording and the corrected arms found beside it.
+
+    ``cleaned_vhdr`` holds only arms whose output file actually exists, keyed by
+    ``Arm.key``, so a comparison never has to distinguish "not generated" from
+    "generated but missing".
+    """
+
     bids_id: str
     str_sub: str
-    idx_run: int
+    #: Identifier read from the filename: ``"run2"``, or a name of its own for a
+    #: recording outside the numbered series, such as ``"BaselineEEG"``.
+    label: str
+    #: Run number, or ``None`` when the filename carries no run token.
+    run: int | None
     stem: str
     fastr_vhdr: Path
-    aas_vhdr: Path | None
-    bcgnet_vhdr: Path | None
+    cleaned_vhdr: Mapping[str, Path]
+
+    def has(self, arm: Arm) -> bool:
+        return arm.key in self.cleaned_vhdr
 
 
-def pair_recordings(config: CompareConfig) -> list[RecordingTriple]:
-    triples: list[RecordingTriple] = []
-    for bids_id, str_sub, vhdrs in iter_subjects(
+def arm_output_vhdr(config: CompareConfig, bids_id: str, src: Path, arm: Arm) -> Path:
+    """Where ``arm``'s corrected copy of ``src`` is expected to live."""
+    root = config.paths.root_for(arm)
+    if arm is BCGNET:
+        return bcgnet_output_vhdr(root, bids_id, src)
+    return correction_output_vhdr(root, bids_id, src, arm=arm)
+
+
+def pair_recordings(config: CompareConfig) -> list[RecordingSet]:
+    recordings: list[RecordingSet] = []
+    for bids_id, str_sub, found in iter_subjects(
         config.paths.fastr_root,
         include=config.include,
         exclude=config.exclude,
+        run_pattern=config.run_pattern,
     ):
-        for idx, src in enumerate(vhdrs, start=1):
-            aas = aas_output_vhdr(config.paths.aas_root, bids_id, src)
-            bcgnet = bcgnet_output_vhdr(config.paths.bcgnet_root, bids_id, src)
-            triples.append(
-                RecordingTriple(
+        for recording in found:
+            src = recording.path
+            cleaned: dict[str, Path] = {}
+            for arm in CLEAN_ARMS:
+                candidate = arm_output_vhdr(config, bids_id, src, arm)
+                if candidate.is_file():
+                    cleaned[arm.key] = candidate
+            recordings.append(
+                RecordingSet(
                     bids_id=bids_id,
                     str_sub=str_sub,
-                    idx_run=idx,
-                    stem=src.stem,
+                    label=recording.label,
+                    run=recording.run,
+                    stem=recording.stem,
                     fastr_vhdr=src,
-                    aas_vhdr=aas if aas.is_file() else None,
-                    bcgnet_vhdr=bcgnet if bcgnet.is_file() else None,
+                    cleaned_vhdr=cleaned,
                 )
             )
-    return triples
+    return recordings

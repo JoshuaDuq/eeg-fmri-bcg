@@ -1,4 +1,4 @@
-"""CLI: bcgnet discover | run | aas | compare."""
+"""CLI: bcgnet discover | run | aas | pca-obs | compare."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import json
 import sys
 from pathlib import Path
 
+from .compare.arms import AAS, PCA_OBS
 from .config import ConfigurationError
+
+#: Subcommands that generate one bounded arm with bcg_correction.
+_COMPARATOR_COMMANDS = {"aas": AAS, "pca-obs": PCA_OBS}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,8 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command in {"discover", "run"}:
             return _run_bcgnet(arguments)
-        if arguments.command == "aas":
-            return _run_aas(arguments)
+        if arguments.command in _COMPARATOR_COMMANDS:
+            return _run_comparator(arguments)
         if arguments.command == "compare":
             return _run_compare(arguments)
     except ConfigurationError as error:
@@ -27,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_bcgnet(arguments: argparse.Namespace) -> int:
-    from .cohort import discover_subjects, run_cohort
+    from .cohort import discover_subjects, run_cohort, run_count
     from .config import load_config
 
     config = load_config(arguments.config)
@@ -36,8 +40,16 @@ def _run_bcgnet(arguments: argparse.Namespace) -> int:
         payload = [
             {
                 "bids_id": spec["bids_id"],
-                "n_runs": len(spec["runs"]),
-                "runs": [run["stem"] for run in spec["runs"]],
+                "n_runs": run_count(spec),
+                "n_recordings": len(spec["recordings"]),
+                "recordings": [
+                    {
+                        "label": recording["label"],
+                        "run": recording["run"],
+                        "stem": recording["stem"],
+                    }
+                    for recording in spec["recordings"]
+                ],
             }
             for spec in subjects
         ]
@@ -49,20 +61,22 @@ def _run_bcgnet(arguments: argparse.Namespace) -> int:
     return 0 if n_ok == len(results) else 1
 
 
-def _run_aas(arguments: argparse.Namespace) -> int:
-    from .aas_batch import run_aas_batch
+def _run_comparator(arguments: argparse.Namespace) -> int:
+    from . import correction_batch
     from .compare.config import load_compare_config
 
+    arm = _COMPARATOR_COMMANDS[arguments.command]
     config = load_compare_config(arguments.config)
-    rows = run_aas_batch(
+    rows = correction_batch.run_correction_batch(
         fastr_root=config.paths.fastr_root,
-        aas_root=config.paths.aas_root,
-        settings=config.aas,
+        output_root=config.paths.root_for(arm),
+        arm=arm,
+        settings=config.correction,
         include=config.include,
         exclude=config.exclude,
     )
     n_ok = sum(1 for row in rows if row["status"] in {"ok", "skipped"})
-    print(f"AAS DONE ok_or_skipped={n_ok}/{len(rows)}")
+    print(f"{arm.label} DONE ok_or_skipped={n_ok}/{len(rows)}")
     return 0 if n_ok == len(rows) else 1
 
 
@@ -78,7 +92,9 @@ def _run_compare(arguments: argparse.Namespace) -> int:
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bcgnet",
-        description="Train BCGNet, run AAS, or compare Raw vs AAS vs BCGNet.",
+        description=(
+            "Train BCGNet, run a bounded comparator arm, or compare them."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
     discover = commands.add_parser(
@@ -93,11 +109,15 @@ def _make_parser() -> argparse.ArgumentParser:
         "aas",
         help="run bundled AAS on every FASTR recording",
     )
+    pca_obs = commands.add_parser(
+        "pca-obs",
+        help="run bundled PCA-OBS on every FASTR recording",
+    )
     compare = commands.add_parser(
         "compare",
-        help="plot Raw vs AAS vs BCGNet from existing folders",
+        help="plot Raw vs every corrected arm from existing folders",
     )
-    for subparser in (discover, run, aas, compare):
+    for subparser in (discover, run, aas, pca_obs, compare):
         subparser.add_argument(
             "--config",
             "-c",

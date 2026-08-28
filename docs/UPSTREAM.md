@@ -29,4 +29,4 @@ Paper YAML is the reference (`num_epochs: 2500`, `batch_size: 1`, `es_patience: 
 
 Upstream interpolates the whole 100 Hz residual back to the original rate. This wrapper interpolates **only the BCG estimate** and subtracts it from the original 1 kHz EEG (`bcgnet.writeback`), then writes BrainVision (`*_fastr_bcgnet.vhdr`).
 
-`bcgnet run` writes Before/After PSD (Raw vs BCGNet). Raw vs AAS vs BCGNet overlays come only from `bcgnet compare`.
+`bcgnet run` writes Before/After PSD (Raw vs BCGNet). Overlays against the AAS and PCA-OBS comparators come only from `bcgnet compare`.

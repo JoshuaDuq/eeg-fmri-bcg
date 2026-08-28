@@ -1,4 +1,4 @@
-"""QC numbers for BCGNet vs AAS: leftover bands, locked residual, alpha peak."""
+"""QC numbers per arm: leftover bands, locked residual, alpha peak."""
 
 from __future__ import annotations
 
@@ -55,14 +55,19 @@ def method_qc_flags(
         "bcgnet_locked_worse_than_raw": bool(locked_worse),
         "alpha_peak_collapsed": bool(collapsed),
         # Alpha-band peak height often tracks BCG harmonics, so collapse
-        # is reported but does not by itself select AAS.
-        "prefer_aas": bool(adds_power or locked_worse),
+        # is reported but does not by itself send you to a comparator.
+        "prefer_comparator": bool(adds_power or locked_worse),
     }
 
 
-def load_aas_peaks(aas_vhdr: Path) -> tuple[np.ndarray, float] | None:
-    """Return (peak_samples, applied delay) from an AAS provenance file."""
-    path = aas_vhdr.parent / f"{aas_vhdr.stem}.bcg.json"
+def load_detector_peaks(vhdr: Path) -> tuple[np.ndarray, float] | None:
+    """Return (peak_samples, applied delay) from a bounded arm's provenance.
+
+    Both bounded arms run the same independent detector and both write
+    ``<stem>.bcg.json``, so either one supplies the R train used to score
+    every arm's heartbeat-locked residual.
+    """
+    path = vhdr.parent / f"{vhdr.stem}.bcg.json"
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))

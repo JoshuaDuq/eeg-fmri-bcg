@@ -1,4 +1,4 @@
-"""Plot Raw vs AAS vs BCGNet. Optionally generate a method first."""
+"""Plot Raw vs every corrected arm. Optionally generate an arm first."""
 
 from __future__ import annotations
 
@@ -10,19 +10,23 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-from ..aas_batch import run_aas_batch
+from ..correction_batch import run_correction_batch
+from .arms import CLEAN_ARMS, COMPARATOR_ARMS
 from .config import CompareConfig
-from .pairs import RecordingTriple, pair_recordings
-from .plots import load_fastr, metrics_row, plot_epoch, plot_psd
+from .pairs import RecordingSet, pair_recordings
+from .plots import RAW_LABEL, load_fastr, metrics_row, plot_epoch, plot_psd
 
 
 def run_comparison(config: CompareConfig) -> list[dict]:
-    if config.run.aas:
-        print("Running AAS batch...")
-        run_aas_batch(
+    for arm in COMPARATOR_ARMS:
+        if not config.run.enabled(arm):
+            continue
+        print(f"Running {arm.label} batch...")
+        run_correction_batch(
             fastr_root=config.paths.fastr_root,
-            aas_root=config.paths.aas_root,
-            settings=config.aas,
+            output_root=config.paths.root_for(arm),
+            arm=arm,
+            settings=config.correction,
             include=config.include,
             exclude=config.exclude,
         )
@@ -35,21 +39,23 @@ def run_comparison(config: CompareConfig) -> list[dict]:
         print("Running BCGNet cohort...")
         run_cohort(load_config(config.bcgnet_config), config.bcgnet_config)
 
-    triples = pair_recordings(config)
+    recordings = pair_recordings(config)
     rows: list[dict] = []
     fig_root = config.paths.output_root / "figures"
-    for triple in triples:
-        traces = _load_traces(triple)
-        if "Raw" not in traces:
+    for recording in recordings:
+        traces = _load_traces(recording)
+        if RAW_LABEL not in traces:
             continue
-        if not any(name in traces for name in ("AAS", "BCGNet")):
-            print(f"skip {triple.bids_id} {triple.stem}: no cleaned files")
+        present = [arm.label for arm in CLEAN_ARMS if arm.label in traces]
+        if not present:
+            print(f"skip {recording.bids_id} {recording.stem}: no cleaned files")
             continue
-        prefix = fig_root / triple.bids_id / f"run{triple.idx_run}"
+        label = recording.label
+        prefix = fig_root / recording.bids_id / label
         plot_psd(
             traces,
-            title=f"Average PSD {triple.bids_id} run {triple.idx_run}",
-            output=prefix.with_name(f"psd_run{triple.idx_run}_avg.png"),
+            title=f"Average PSD {recording.bids_id} {label}",
+            output=prefix.with_name(f"psd_{label}_avg.png"),
             max_hz=config.plot.psd_max_hz,
         )
         plot_epoch(
@@ -57,46 +63,44 @@ def run_comparison(config: CompareConfig) -> list[dict]:
             channel=config.plot.channel,
             start=config.plot.epoch_start_seconds,
             duration=config.plot.epoch_seconds,
-            title=f"{triple.bids_id} {config.plot.channel} run {triple.idx_run}",
+            title=(
+                f"{recording.bids_id} {config.plot.channel} {label}"
+            ),
             output=prefix.with_name(
-                f"epoch_run{triple.idx_run}_{config.plot.channel}.png"
+                f"epoch_{label}_{config.plot.channel}.png"
             ),
         )
         rows.append(
             metrics_row(
-                triple,
+                recording,
                 traces,
                 max_hz=config.plot.psd_max_hz,
-                window_seconds=config.aas.window_seconds,
+                window_seconds=config.correction.window_seconds,
             )
         )
         print(
-            f"compared {triple.bids_id} run {triple.idx_run} "
-            f"aas={triple.aas_vhdr is not None} "
-            f"bcgnet={triple.bcgnet_vhdr is not None}"
+            f"compared {recording.bids_id} {recording.label} "
+            f"arms={'+'.join(present)}"
         )
     _write_summary(config.paths.output_root, rows)
     return rows
 
 
-def _load_traces(triple: RecordingTriple) -> dict:
+def _load_traces(recording: RecordingSet) -> dict:
     traces = {}
     try:
-        raw = load_fastr(triple.fastr_vhdr)
+        traces[RAW_LABEL] = load_fastr(recording.fastr_vhdr)
     except Exception as error:
-        print(f"failed to load FASTR {triple.fastr_vhdr}: {error}")
+        print(f"failed to load FASTR {recording.fastr_vhdr}: {error}")
         return traces
-    traces["Raw"] = raw
-    if triple.aas_vhdr is not None:
+    for arm in CLEAN_ARMS:
+        vhdr = recording.cleaned_vhdr.get(arm.key)
+        if vhdr is None:
+            continue
         try:
-            traces["AAS"] = load_fastr(triple.aas_vhdr)
+            traces[arm.label] = load_fastr(vhdr)
         except Exception as error:
-            print(f"failed to load AAS {triple.aas_vhdr}: {error}")
-    if triple.bcgnet_vhdr is not None:
-        try:
-            traces["BCGNet"] = load_fastr(triple.bcgnet_vhdr)
-        except Exception as error:
-            print(f"failed to load BCGNet {triple.bcgnet_vhdr}: {error}")
+            print(f"failed to load {arm.label} {vhdr}: {error}")
     return traces
 
 

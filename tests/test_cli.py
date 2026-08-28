@@ -66,3 +66,84 @@ def test_split_fractions_must_sum_to_one(tmp_path: Path) -> None:
     path = _write_config(tmp_path, per_training=0.5, per_valid=0.5, per_test=0.5)
     with pytest.raises(ConfigurationError, match="sum to 1"):
         load_config(path)
+
+
+def _write_compare_config(tmp_path: Path) -> Path:
+    document = {
+        "paths": {
+            "fastr_root": str(tmp_path / "fastr"),
+            "aas_root": str(tmp_path / "aas"),
+            "pca_obs_root": str(tmp_path / "pca_obs"),
+            "bcgnet_root": str(tmp_path / "bcgnet"),
+            "output_root": str(tmp_path / "out"),
+        },
+        "run": {"aas": False, "pca_obs": False, "bcgnet": False},
+        "correction": {
+            "window_seconds": [-0.2, 0.7],
+            "ecg_to_bcg_delay_seconds": 0.21,
+            "aas_neighbor_count": 20,
+            "pca_obs_components": 4,
+            "maximum_residual_ratio": 0.5,
+            "overwrite": False,
+            "detector": {
+                "ecg_channel": "ECG",
+                "preprocessing_band_hz": [0.5, 10.0],
+                "teager_emphasis_hz": 10.0,
+                "teager_smoothing_seconds": 0.028,
+                "template_window_seconds": [-0.2, 0.4],
+                "minimum_rr_seconds": 0.4,
+                "maximum_rr_seconds": 2.0,
+                "candidate_refractory_seconds": 0.25,
+                "candidate_prominence_mad": 2.0,
+                "correlation_threshold": 0.5,
+                "refinement_iterations": 2,
+            },
+        },
+        "plot": {
+            "channel": "Cz",
+            "epoch_start_seconds": 10,
+            "epoch_seconds": 3,
+            "psd_max_hz": 30,
+        },
+        "subjects": {"include": [], "exclude": []},
+    }
+    path = tmp_path / "compare.yaml"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    return path
+
+
+def _capture_batch(monkeypatch) -> dict:
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "bcgnet.correction_batch.run_correction_batch", fake_run
+    )
+    return captured
+
+
+def test_pca_obs_command_writes_into_the_pca_obs_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from bcgnet.compare.arms import PCA_OBS
+
+    captured = _capture_batch(monkeypatch)
+    path = _write_compare_config(tmp_path)
+    assert main(["pca-obs", "--config", str(path)]) == 0
+    assert captured["arm"] is PCA_OBS
+    assert captured["output_root"] == (tmp_path / "pca_obs").resolve()
+
+
+def test_aas_command_still_writes_into_the_aas_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from bcgnet.compare.arms import AAS
+
+    captured = _capture_batch(monkeypatch)
+    path = _write_compare_config(tmp_path)
+    assert main(["aas", "--config", str(path)]) == 0
+    assert captured["arm"] is AAS
+    assert captured["output_root"] == (tmp_path / "aas").resolve()

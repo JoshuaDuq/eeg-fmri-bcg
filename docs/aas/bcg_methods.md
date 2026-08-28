@@ -1,6 +1,9 @@
 # Independent cardiac detection and BCG correction
 
-Library for `src/bcg_correction/` (`bcgnet aas` / `bcg-correct`). `bcgnet run` does not call it. Study compare overlays existing AAS BrainVision (`*_fastr_bcg.vhdr`). PCA-OBS is implemented below; it is not a study compare arm.
+Library for `src/bcg_correction/` (`bcgnet aas`, `bcgnet pca-obs`, `bcg-correct`). `bcgnet run`
+does not call it. Both bounded methods below are study compare arms: AAS writes
+`*_fastr_bcg.vhdr` and PCA-OBS writes `*_fastr_pcaobs.vhdr`, each under its own root, so
+the two never overwrite each other.
 
 This stage is independent of BrainVision Analyzer's cardiac markers. It
 accepts FASTR gradient-corrected BrainVision and detects cardiac events from the ECG

@@ -1,9 +1,57 @@
-"""Shared FASTR subject / run discovery."""
+"""Shared FASTR subject / recording discovery.
+
+Each recording is labelled from its own filename rather than from its position
+in the folder listing. A name carrying a run token -- ``run1``, ``run-02``,
+``RUN_3`` -- is that run; a name carrying none, such as a baseline or resting
+acquisition, is not a run at all. It is still discovered and processed, it is
+just never counted, staged, or plotted as one.
+
+Nothing here knows the task names used by any particular study.
+``DEFAULT_RUN_PATTERN`` recognises the usual spellings, and a dataset that
+numbers its runs some other way supplies its own regex through
+``naming.run_pattern`` in the configuration.
+"""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
+
+#: Matches ``run1``, ``run_2``, ``run-02``, ``RUN.3``. The lookbehind keeps the
+#: token from matching inside a longer word, so neither the ``r`` of a
+#: ``_fastr_`` pipeline suffix nor a task called ``prerun2`` reads as a run.
+DEFAULT_RUN_PATTERN = r"(?<![A-Za-z])run[ _.-]?(\d+)"
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9]+")
+_FALLBACK_LABEL = "recording"
+
+
+@dataclass(frozen=True, slots=True)
+class Recording:
+    """One FASTR recording, labelled from its filename.
+
+    :param path: the ``.vhdr`` on disk.
+    :param label: filesystem-safe identifier used for staged filenames,
+        figures, and metrics -- ``"run1"`` for a numbered run, otherwise a name
+        derived from the recording's own filename, e.g. ``"BaselineEEG"``.
+        Unique within a subject.
+    :param run: the run number parsed out of the filename, or ``None`` when the
+        name carries no run token.
+    """
+
+    path: Path
+    label: str
+    run: int | None
+
+    @property
+    def is_run(self) -> bool:
+        """Whether this recording belongs to the study's numbered series."""
+        return self.run is not None
+
+    @property
+    def stem(self) -> str:
+        return self.path.stem
 
 
 def list_vhdrs(folder: Path) -> list[Path]:
@@ -16,13 +64,25 @@ def list_vhdrs(folder: Path) -> list[Path]:
     )
 
 
-def run_sort_key(path: Path):
-    name = path.name
-    if name.startswith("BaselineEEG"):
-        return (0, 0, name)
-    match = re.search(r"run(\d+)", name, re.I)
-    run_n = int(match.group(1)) if match else 99
-    return (1, run_n, name)
+def label_recordings(
+    paths: list[Path],
+    *,
+    run_pattern: str = DEFAULT_RUN_PATTERN,
+) -> list[Recording]:
+    """Label ``paths`` from their filenames, non-runs first then runs ascending.
+
+    Labels are made unique by suffixing, so two recordings can never be staged
+    over one another however a study names its files.
+    """
+    pattern = re.compile(run_pattern, re.IGNORECASE)
+    taken: set[str] = set()
+    recordings = []
+    for path in sorted(paths, key=lambda item: item.name):
+        match = pattern.search(path.stem)
+        run = int(match.group(1)) if match else None
+        base = f"run{run}" if run is not None else _non_run_label(path.stem)
+        recordings.append(Recording(path=path, label=_unique(base, taken), run=run))
+    return sorted(recordings, key=_sort_key)
 
 
 def iter_subjects(
@@ -30,9 +90,10 @@ def iter_subjects(
     *,
     include: tuple[str, ...] = (),
     exclude: tuple[str, ...] = (),
-) -> list[tuple[str, str, list[Path]]]:
-    """Return (bids_id, str_sub, fastr_vhdrs) for each subject folder."""
-    subjects: list[tuple[str, str, list[Path]]] = []
+    run_pattern: str = DEFAULT_RUN_PATTERN,
+) -> list[tuple[str, str, list[Recording]]]:
+    """Return (bids_id, str_sub, recordings) for each subject folder."""
+    subjects: list[tuple[str, str, list[Recording]]] = []
     if not root.is_dir():
         return subjects
     for sub_dir in sorted(root.iterdir()):
@@ -46,8 +107,41 @@ def iter_subjects(
                 continue
         if bids_id in exclude:
             continue
-        vhdrs = sorted(list_vhdrs(sub_dir), key=run_sort_key)
-        if not vhdrs:
+        recordings = label_recordings(
+            list_vhdrs(sub_dir), run_pattern=run_pattern
+        )
+        if not recordings:
             continue
-        subjects.append((bids_id, bids_id.replace("-", ""), vhdrs))
+        subjects.append((bids_id, bids_id.replace("-", ""), recordings))
     return subjects
+
+
+def _non_run_label(stem: str) -> str:
+    """Name a recording that carries no run token, using its own filename.
+
+    The leading token is what distinguishes such a recording from its siblings
+    in every layout we have seen, and it is short enough to read in a figure
+    filename. Uniqueness is enforced by the caller, so a bad guess costs
+    legibility, never correctness.
+    """
+    for candidate in (stem.split("_")[0], stem):
+        safe = _UNSAFE.sub("", candidate)
+        if safe:
+            return safe
+    return _FALLBACK_LABEL
+
+
+def _unique(label: str, taken: set[str]) -> str:
+    candidate = label
+    suffix = 2
+    while candidate in taken:
+        candidate = f"{label}_{suffix}"
+        suffix += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _sort_key(recording: Recording) -> tuple[int, int, str]:
+    if recording.run is None:
+        return (0, 0, recording.label)
+    return (1, recording.run, recording.label)

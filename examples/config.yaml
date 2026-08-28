@@ -1,4 +1,6 @@
-# BCGNet training. Copy and set paths. AAS comparison is examples/compare.yaml.
+# Template: BCGNet training.
+# Copy to the repository root as config.yaml and set the paths.
+# Comparison against AAS and PCA-OBS is examples/compare.yaml.
 
 paths:
   fastr_root: /path/to/fastr_python
@@ -35,3 +37,11 @@ preprocess:
 subjects:
   include: []
   exclude: []
+
+# Optional. How run numbers are read out of recording filenames. The default
+# matches run1, run_2, run-02, RUN.3 and does not match "run" inside a longer
+# word. A recording whose name has no run token -- a baseline, say -- is still
+# trained on and still cleaned; it is simply not counted or plotted as a run,
+# and it is named after its own filename instead.
+# naming:
+#   run_pattern: 'run[ _.-]?(\d+)'

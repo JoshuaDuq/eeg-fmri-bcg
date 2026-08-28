@@ -1,5 +1,6 @@
-# BCGNet cohort configuration.
-# Copy this file, edit paths and compute settings, then:
+# BCGNet training configuration.
+# This is the live config for this study; examples/config.yaml is the
+# template. Comparison against AAS and PCA-OBS is compare.yaml.
 #   bcgnet discover --config config.yaml
 #   bcgnet run --config config.yaml
 
@@ -42,3 +43,11 @@ subjects:
   # Empty include list means every sub-* folder under fastr_root.
   include: []
   exclude: []
+
+# Optional. How run numbers are read out of recording filenames. The default
+# matches run1, run_2, run-02, RUN.3 and does not match "run" inside a longer
+# word. A recording whose name has no run token -- a baseline, say -- is still
+# trained on and still cleaned; it is simply not counted or plotted as a run,
+# and it is named after its own filename instead.
+# naming:
+#   run_pattern: 'run[ _.-]?(\d+)'
