@@ -21,9 +21,7 @@ def _write_config(tmp_path: Path, **preprocess_overrides) -> Path:
     document = {
         "paths": {
             "fastr_root": str(tmp_path / "fastr"),
-            "eval_root": "",
             "output_root": str(tmp_path / "out"),
-            "eval_name": "AAS",
         },
         "compute": {
             "workers": 2,

@@ -8,7 +8,10 @@ from tabulate import tabulate
 
 def interpolate_raw_dataset(dataset, orig_raw_dataset):
     """
-    Interpolate the downsampled dataset to the original sampling rate
+    Interpolate the downsampled dataset to the original sampling rate.
+
+    Unused by the wrapper: BCGNet subtracts interpolated BCG from original-rate
+    EEG in ``bcgnet.writeback`` instead of upsampling the residual.
 
     :param mne.io.RawArray dataset: object holding the downsampled dataset
     :param mne.io.RawArray orig_raw_dataset: object holding the raw dataset with the original sampling rate

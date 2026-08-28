@@ -18,9 +18,7 @@ class ConfigurationError(ValueError):
 @dataclass(frozen=True, slots=True)
 class PathConfig:
     fastr_root: Path
-    eval_root: Path | None
     output_root: Path
-    eval_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +70,7 @@ class BCGNetConfig:
 
 
 _TOP = frozenset({"paths", "compute", "training", "preprocess", "subjects"})
-_PATH_KEYS = frozenset({"fastr_root", "eval_root", "output_root", "eval_name"})
+_PATH_KEYS = frozenset({"fastr_root", "output_root"})
 _COMPUTE_KEYS = frozenset({"workers", "cpu_count", "threads_per_worker"})
 _TRAINING_KEYS = frozenset(
     {
@@ -135,11 +133,6 @@ def load_config(path: str | Path) -> BCGNetConfig:
     else:
         threads_per_worker = _integer(compute, "threads_per_worker", minimum=1)
 
-    eval_root_value = paths["eval_root"]
-    eval_root = None if eval_root_value in (None, "") else _path_value(
-        paths, "eval_root", base
-    )
-
     per_training = _fraction(preprocess, "per_training")
     per_valid = _fraction(preprocess, "per_valid")
     per_test = _fraction(preprocess, "per_test")
@@ -154,9 +147,7 @@ def load_config(path: str | Path) -> BCGNetConfig:
     return BCGNetConfig(
         paths=PathConfig(
             fastr_root=_path_value(paths, "fastr_root", base),
-            eval_root=eval_root,
             output_root=_path_value(paths, "output_root", base),
-            eval_name=_string(paths, "eval_name"),
         ),
         compute=ComputeConfig(
             workers=workers,

@@ -1,8 +1,6 @@
 paths:
   fastr_root: /path/to/fastr_python
-  eval_root: /path/to/fastr_python_bcg_gapfix
   output_root: /path/to/fastr_python_bcgnet
-  eval_name: AAS
 
 compute:
   workers: 2
@@ -10,9 +8,9 @@ compute:
   threads_per_worker: auto
 
 training:
-  # Paper YAML: num_epochs 2500, es_patience 25, batch_size 1.
-  num_epochs: 80
-  es_patience: 12
+  # Cap is the paper YAML (2500). Early stopping decides. Keep batch 16.
+  num_epochs: 2500
+  es_patience: 25
   batch_size: 16
   learning_rate: 0.001
   random_seed: 1997

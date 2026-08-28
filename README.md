@@ -1,13 +1,15 @@
-# BCGNet-Python
+# EEG-fMRI-BCG
 
 One project, two BCG methods, plus a comparison command.
 
-| Namespace | Method | CLI |
-|-----------|--------|-----|
-| `bcgnet` | GRU ECG→BCG ([jiaangyao/BCGNet](https://github.com/jiaangyao/BCGNet)) | `bcgnet run` |
-| `bcg_correction` | Independent R-peaks + AAS / PCA-OBS | `bcgnet aas` or `bcg-correct` |
+| Command | What it does | Figures |
+|---------|--------------|---------|
+| `bcgnet run` | Train one GRU per subject, write `*_fastr_bcgnet.vhdr` | `training_history.png` and before/after PSD |
+| `bcgnet aas` | AAS on every FASTR recording | none |
+| `bcgnet compare` | Overlay FASTR vs AAS vs BCGNet | PSD + epoch + `compare_summary.csv` |
 
-They do not share correction code. Comparison only happens when you ask for it.
+They do not share correction code. Training never loads AAS. Before/after PSDs
+are Raw vs BCGNet only; AAS overlays stay in `bcgnet compare`.
 
 ## Install
 
@@ -27,7 +29,7 @@ bcgnet run --config config.yaml
 Input is FASTR-corrected EEG (gradient gone, BCG still present). One model per
 subject. Details: [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
 
-## AAS / PCA-OBS (bundled BCG-Python)
+## AAS (bundled BCG-Python)
 
 The former BCG-Python library lives in `src/bcg_correction/`. Same YAML as
 before, plus a cohort runner:
@@ -41,24 +43,26 @@ Method notes: [`docs/aas/bcg_methods.md`](docs/aas/bcg_methods.md).
 
 ## Compare the two
 
-`examples/compare.yaml` can either **run** a method or **reuse folders you
-already have**. With both `run.aas` and `run.bcgnet` false it only plots:
+With both `run.aas` and `run.bcgnet` false, this only plots folders you already
+have (`bcgnet run` / `bcgnet aas`):
 
 ```text
 bcgnet compare --config examples/compare.yaml
 ```
 
-That reads:
+That is the only Raw / AAS / BCGNet overlay.
+
+It reads:
 
 - FASTR: `paths.fastr_root`
-- AAS: `paths.aas_root` (`*_fastr_bcg.vhdr`, e.g. `fastr_python_bcg_gapfix`)
-- BCGNet: `paths.bcgnet_root` (`*_r0{n}_bcgnet.mat`)
+- AAS: `paths.aas_root` (`*_fastr_bcg.vhdr`)
+- BCGNet: `paths.bcgnet_root` (`*_fastr_bcgnet.vhdr`)
 
-and writes GitHub-style PSD and epoch overlays (Raw / AAS / BCGNet) plus
-`compare_summary.csv`.
+and writes PSD/epoch overlays plus `compare_summary.csv` (delta/theta/alpha
+remaining, heartbeat-locked residual, `prefer_aas` when BCGNet adds power or
+worsens locked residual).
 
-To compute a method first, set `run.aas: true` and/or `run.bcgnet: true`
-(BCGNet then uses `bcgnet_config:`).
+To generate a method first, set `run.aas` and/or `run.bcgnet`.
 
 ## Citation
 

@@ -12,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from .config import BCGNetConfig, ConfigurationError
-from .discovery import iter_subjects, list_vhdrs
+from .discovery import iter_subjects
 from .runtime import VENDOR_ROOT, prepare_vendor_imports
 
 
@@ -27,30 +27,13 @@ def discover_subjects(config: BCGNetConfig) -> list[dict]:
         include=config.subjects.include,
         exclude=config.subjects.exclude,
     ):
-        aas_dir = (
-            config.paths.eval_root / bids_id if config.paths.eval_root else None
-        )
-        aas_index = {}
-        if aas_dir is not None:
-            for path in list_vhdrs(aas_dir):
-                aas_index[path.name.replace("_fastr_bcg.vhdr", "_fastr.vhdr")] = path
         runs = []
         for idx, src in enumerate(fastr, start=1):
-            aas_path = None
-            if aas_dir is not None:
-                aas_path = aas_index.get(src.name)
-                if aas_path is None:
-                    candidate = aas_dir / src.name.replace(
-                        "_fastr.vhdr", "_fastr_bcg.vhdr"
-                    )
-                    if candidate.exists():
-                        aas_path = candidate
             runs.append(
                 {
                     "idx": idx,
                     "stem": src.stem,
                     "fastr_vhdr": str(src),
-                    "eval_vhdr": str(aas_path) if aas_path else None,
                 }
             )
         subjects.append(
@@ -79,36 +62,23 @@ def _rewrite_vhdr(src_vhdr: Path, dst_vhdr: Path) -> None:
         os.symlink(src, dst)
 
 
-def stage_subject(spec: dict, output_root: Path) -> bool:
+def stage_subject(spec: dict, output_root: Path) -> None:
     str_sub = spec["str_sub"]
     raw_dir = output_root / "staged" / "raw_data" / str_sub
-    eval_dir = output_root / "staged" / "eval_data" / str_sub
-    have_eval = True
     for run in spec["runs"]:
         idx = run["idx"]
         _rewrite_vhdr(
             Path(run["fastr_vhdr"]),
             raw_dir / f"{str_sub}_r0{idx}_raw.vhdr",
         )
-        if run["eval_vhdr"]:
-            _rewrite_vhdr(
-                Path(run["eval_vhdr"]),
-                eval_dir / f"{str_sub}_r0{idx}_eval.vhdr",
-            )
-        else:
-            have_eval = False
-    return have_eval
 
 
 def _band_metrics(dataset, vendor_cfg, mode: str = "test") -> list[dict]:
     from dataset.dataset_utils import compute_band_power, compute_psd
 
-    raw_set, eval_set, cleaned_set, _ = dataset._get_set_data(mode=mode)
+    raw_set, _eval_set, cleaned_set, _ = dataset._get_set_data(mode=mode)
     f_raw, pxx_raw, _, _ = compute_psd(raw_set)
     f_cln, pxx_cln, _, _ = compute_psd(cleaned_set)
-    f_eval = pxx_eval = None
-    if eval_set is not None:
-        f_eval, pxx_eval, _, _ = compute_psd(eval_set)
     bands = [
         ("delta", vendor_cfg.cutoff_low_delta, vendor_cfg.cutoff_high_delta),
         ("theta", vendor_cfg.cutoff_low_theta, vendor_cfg.cutoff_high_theta),
@@ -118,17 +88,14 @@ def _band_metrics(dataset, vendor_cfg, mode: str = "test") -> list[dict]:
     for name, lo, hi in bands:
         raw_p = float(compute_band_power(f_raw, pxx_raw, lo, hi))
         cln_p = float(compute_band_power(f_cln, pxx_cln, lo, hi))
-        row = {
-            "band": name,
-            "raw": raw_p,
-            "bcgnet": cln_p,
-            "bcgnet_ratio": cln_p / raw_p if raw_p else None,
-        }
-        if f_eval is not None:
-            eval_p = float(compute_band_power(f_eval, pxx_eval, lo, hi))
-            row["eval"] = eval_p
-            row["eval_ratio"] = eval_p / raw_p if raw_p else None
-        rows.append(row)
+        rows.append(
+            {
+                "band": name,
+                "raw": raw_p,
+                "bcgnet": cln_p,
+                "bcgnet_ratio": cln_p / raw_p if raw_p else None,
+            }
+        )
     return rows
 
 
@@ -198,26 +165,20 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
     old_stdout = sys.stdout
     sys.stdout = tee
     try:
-        have_eval = stage_subject(spec, output_root)
+        stage_subject(spec, output_root)
         vendor_cfg = get_config(filename=VENDOR_ROOT / "config" / "default_config.yaml")
         vendor_cfg.d_root = VENDOR_ROOT
         vendor_cfg.d_data = output_root / "staged" / "raw_data"
         vendor_cfg.d_model = output_root / "trained_model" / str_sub
         vendor_cfg.d_output = output_root / "cleaned_data"
-        fig_dir = output_root / "figures" / str_sub
-        fig_dir.mkdir(parents=True, exist_ok=True)
-        if have_eval and config.paths.eval_root is not None:
-            vendor_cfg.d_eval = output_root / "staged" / "eval_data"
-            vendor_cfg.str_eval = config.paths.eval_name
-        else:
-            vendor_cfg.d_eval = None
-            vendor_cfg.str_eval = None
+        vendor_cfg.d_eval = None
+        vendor_cfg.str_eval = None
         vendor_cfg.num_epochs = config.training.num_epochs
         vendor_cfg.es_patience = config.training.es_patience
         vendor_cfg.batch_size = config.training.batch_size
         vendor_cfg.lr = config.training.learning_rate
         vendor_cfg.new_fs = config.preprocess.new_fs
-        vendor_cfg.len_epoch = config.preprocess.len_epoch
+        vendor_cfg.len_epoch = round(config.preprocess.len_epoch)
         vendor_cfg.mad_threshold = config.preprocess.mad_threshold
         vendor_cfg.per_training = config.preprocess.per_training
         vendor_cfg.per_valid = config.preprocess.per_valid
@@ -266,7 +227,6 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
             }
             if rms is not None:
                 row["rms_raw"] = float(rms[0])
-                row["rms_eval"] = float(rms[1]) if rms[1] is not None else None
                 row["rms_bcgnet"] = float(rms[2])
             try:
                 row["bands"] = _band_metrics(dataset, vendor_cfg, mode="test")
@@ -276,25 +236,46 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
 
         if config.training.save_model:
             session.save_model()
-        if config.training.save_data:
-            session.save_data()
-        if config.training.save_figures:
-            session.plot_training_history(p_figure=fig_dir)
-            try:
-                session.plot_random_epoch(
-                    str_ch_eeg="Cz", mode="test", p_figure=fig_dir
+        if config.training.save_data or config.training.save_figures:
+            from .compare.plots import load_fastr
+            from .export import bcgnet_output_vhdr, write_bcgnet_recording
+            from .figures import plot_before_after_psd
+
+            fig_dir = output_root / "figures" / str_sub
+            for dataset, run in zip(
+                session.vec_dataset, spec["runs"], strict=True
+            ):
+                cleaned = (
+                    dataset.orig_cleaned_dataset
+                    if dataset.resampled
+                    else dataset.cleaned_dataset
                 )
-            except Exception as exc:
-                print("FAILED plot_random_epoch", type(exc).__name__, exc)
-            try:
-                session.plot_psd(str_ch_eeg="avg", mode="test", p_figure=fig_dir)
-            except Exception as exc:
-                print("FAILED plot_psd", type(exc).__name__, exc)
+                if config.training.save_data:
+                    write_bcgnet_recording(
+                        cleaned,
+                        Path(run["fastr_vhdr"]),
+                        bcgnet_output_vhdr(
+                            output_root, bids_id, Path(run["fastr_vhdr"])
+                        ),
+                        overwrite=config.training.overwrite,
+                    )
+                if config.training.save_figures:
+                    plot_before_after_psd(
+                        load_fastr(Path(run["fastr_vhdr"])),
+                        cleaned,
+                        title=(
+                            f"{bids_id} run {dataset.idx_run} before vs after"
+                        ),
+                        output=fig_dir / f"psd_run{dataset.idx_run}_avg.png",
+                    )
+        if config.training.save_figures:
+            fig_dir = output_root / "figures" / str_sub
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            session.plot_training_history(p_figure=fig_dir)
 
         result.update(
             {
                 "status": "ok",
-                "have_eval": have_eval,
                 "end_epoch": (
                     int(session.end_epoch) if session.end_epoch is not None else None
                 ),
@@ -349,22 +330,12 @@ def write_cohort_summary(results: list[dict], output_root: Path) -> Path:
                     "end_epoch": result.get("end_epoch"),
                     "runtime_seconds": result.get("runtime_seconds"),
                     "rms_raw": metric.get("rms_raw"),
-                    "rms_eval": metric.get("rms_eval"),
                     "rms_bcgnet": metric.get("rms_bcgnet"),
-                    "delta_eval_ratio": (bands.get("delta") or {}).get(
-                        "eval_ratio"
-                    ),
                     "delta_bcgnet_ratio": (bands.get("delta") or {}).get(
                         "bcgnet_ratio"
                     ),
-                    "theta_eval_ratio": (bands.get("theta") or {}).get(
-                        "eval_ratio"
-                    ),
                     "theta_bcgnet_ratio": (bands.get("theta") or {}).get(
                         "bcgnet_ratio"
-                    ),
-                    "alpha_eval_ratio": (bands.get("alpha") or {}).get(
-                        "eval_ratio"
                     ),
                     "alpha_bcgnet_ratio": (bands.get("alpha") or {}).get(
                         "bcgnet_ratio"

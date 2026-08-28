@@ -6,10 +6,7 @@
 paths:
   # Gradient-corrected EEG (BCG still present).
   fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python
-  # Optional AAS/OBS comparison root. Set to "" to skip comparison.
-  eval_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcg_gapfix
   output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
-  eval_name: AAS
 
 compute:
   # Two subject workers share this machine's 10 cores.
@@ -19,9 +16,9 @@ compute:
   threads_per_worker: auto
 
 training:
-  # Paper YAML: num_epochs 2500, es_patience 25, batch_size 1.
-  num_epochs: 80
-  es_patience: 12
+  # Cap is the paper YAML (2500). Early stopping decides. Keep batch 16.
+  num_epochs: 2500
+  es_patience: 25
   batch_size: 16
   learning_rate: 0.001
   random_seed: 1997

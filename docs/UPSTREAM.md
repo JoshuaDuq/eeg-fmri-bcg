@@ -44,7 +44,16 @@ limited to compatibility:
 
 Paper hyperparameters in the upstream YAML remain the reference
 (`num_epochs: 2500`, `batch_size: 1`, `es_patience: 25`, `new_fs: 100`,
-3 s epochs). The study `config.yaml` may use shorter training for a cohort
-run; those values override the vendor YAML at Session construction.
+3 s epochs). Study `config.yaml` uses that epoch cap and patience, with
+`batch_size: 16`. Those values override the vendor YAML at Session
+construction.
+
+The vendor toolbox interpolates the entire 100 Hz residual back to the
+original rate. This wrapper does not: it interpolates only the BCG
+estimate and subtracts it from the original 1 kHz EEG (`bcgnet.writeback`),
+then writes BrainVision (`*_fastr_bcgnet.vhdr`) rather than MATLAB `.mat`.
+`bcgnet run` writes a Raw vs BCGNet (before/after) PSD. Raw / AAS / BCGNet
+overlays are produced only by `bcgnet compare`, not by the vendor
+`plot_psd` / `plot_random_epoch` hooks.
 
 Do not install `vendor/requirement.yml`. Use this package's `pyproject.toml`.

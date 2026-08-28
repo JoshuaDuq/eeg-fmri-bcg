@@ -24,12 +24,7 @@ class AasSettings:
 
 
 def aas_output_vhdr(aas_root: Path, bids_id: str, fastr_vhdr: Path) -> Path:
-    stem = fastr_vhdr.stem
-    if stem.endswith("_fastr"):
-        out_stem = f"{stem}_bcg"
-    else:
-        out_stem = f"{stem}_bcg"
-    return aas_root / bids_id / f"{out_stem}.vhdr"
+    return aas_root / bids_id / f"{fastr_vhdr.stem}_bcg.vhdr"
 
 
 def run_aas_batch(

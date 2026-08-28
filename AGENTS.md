@@ -2,9 +2,11 @@
 
 Two correction libraries live here and must stay separate:
 
-- `src/bcgnet/` — GRU ECG→BCG (`bcgnet run`)
-- `src/bcg_correction/` — independent R detection + AAS/PCA-OBS (`bcgnet aas`)
-- `src/bcgnet/compare/` — plots Raw vs AAS vs BCGNet; may *call* both, never mix their internals
+- `src/bcgnet/` — GRU ECG→BCG (`bcgnet run`); no AAS load. Writes
+  `training_history.png` and Raw vs BCGNet (before/after) PSDs.
+- `src/bcg_correction/` — independent R detection + AAS (`bcgnet aas`)
+- `src/bcgnet/compare/` — the only Raw vs AAS vs BCGNet overlay; may *call*
+  `run`/`aas`, never mix their internals
 
 FASTR-Python stays gradient-only (`mri-correct`).
 

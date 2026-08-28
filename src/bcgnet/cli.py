@@ -79,7 +79,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bcgnet",
         description=(
-            "BCGNet GRU correction, bundled AAS/PCA-OBS, and comparison plots."
+            "BCGNet GRU training, bundled AAS, and Raw/AAS/BCGNet comparison."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -93,11 +93,11 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     aas = commands.add_parser(
         "aas",
-        help="run bundled AAS/PCA-OBS on every FASTR recording",
+        help="run bundled AAS on every FASTR recording",
     )
     compare = commands.add_parser(
         "compare",
-        help="plot Raw vs AAS vs BCGNet (run them or use existing folders)",
+        help="plot Raw vs AAS vs BCGNet from existing folders",
     )
     for subparser in (discover, run, aas, compare):
         subparser.add_argument(

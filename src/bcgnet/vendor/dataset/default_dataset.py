@@ -9,7 +9,7 @@ try:
 except ImportError:  # scipy < 1.9
     from scipy.stats import median_absolute_deviation
 from utils import temp_seed
-from dataset import interpolate_raw_dataset, compute_rms, compute_psd, examine_mode
+from dataset import compute_rms, compute_psd, examine_mode
 
 
 class Dataset:
@@ -23,7 +23,7 @@ class Dataset:
         :param int idx_run: index of the current run, e.g. 1
         :param pathlib.Path d_eval: (Optional) pathlib object containing the absolute path to the directory
             the single run of cleaned data from the alternative method used for comparison
-        :param str str_eval: (Optional) name of the alternative method, e.g. OBS. Only relevant if d_eval is provided
+        :param str str_eval: (Optional) name of the alternative method, e.g. AAS. Only relevant if d_eval is provided
         :param int random_seed: numpy random_seed used during the random splitting of entire dataset into
             training, validation and test sets is always the same, useful for model selection and evaluation
         :param bool cv_mode: whether or not to use the cross validation mode. If num_fold argument is provided when
@@ -452,22 +452,27 @@ class Dataset:
             in each epoch
         """
 
+        epoch_seconds = int(round(float(len_epoch)))
+        duration_seconds = int(np.floor(len_recording / fs))
+
         # create the empty numpy array to hold the events, of shape (floor(time/duration), 3)
-        constructed_events = np.zeros(shape=(int(np.floor(len_recording / fs) / len_epoch), 3), dtype=int)
+        constructed_events = np.zeros(
+            shape=(int(np.floor(duration_seconds / epoch_seconds)), 3), dtype=int
+        )
 
         # populate the constructed_events created with the starting index of each time window
         # the numbers 0 and 1 are for marking the event as fake for MNE
         # fake events are of custom latency, 0 duration and tag 999
-        for i in range(0, int(np.floor(len_recording / fs)) - len_epoch, len_epoch):
-            ix = i / len_epoch
+        for i in range(0, duration_seconds - epoch_seconds, epoch_seconds):
+            ix = i / epoch_seconds
             constructed_events[int(ix)] = np.array([i * fs, 0, 999])
 
-        n_events = len(range(0, int(np.floor(len_recording / fs)) - len_epoch, len_epoch))
+        n_events = len(range(0, duration_seconds - epoch_seconds, epoch_seconds))
         if n_events < constructed_events.shape[0]:
             constructed_events = constructed_events[:n_events, :]
 
         # Delete the last sample to make the length of the time window even
-        tmax = len_epoch - 1 / fs
+        tmax = epoch_seconds - 1 / fs
 
         return constructed_events, tmax
 
@@ -846,10 +851,19 @@ class Dataset:
         epoched_cleaned_dataset = Dataset._extract_good_epochs(cleaned_dataset, len_epoch, vec_idx_good_epochs)
 
         if resampled:
-            # Interpolate the dataset and perform the same operation
-            orig_cleaned_dataset = interpolate_raw_dataset(cleaned_dataset, orig_raw_dataset)
-            epoched_orig_cleaned_dataset = Dataset._extract_good_epochs(orig_cleaned_dataset, len_epoch,
-                                                                        vec_idx_good_epochs)
+            if orig_raw_dataset is None:
+                raise ValueError("orig_raw_dataset is required when resampled")
+            from bcgnet.writeback import subtract_interpolated_bcg, unstandardized_bcg
+
+            orig_cleaned_dataset = subtract_interpolated_bcg(
+                orig_raw_dataset,
+                unstandardized_bcg(predicted_bcg_data, eeg_stats[1]),
+                raw_dataset.times,
+                ecg_channel=str_ecg_channel,
+            )
+            epoched_orig_cleaned_dataset = Dataset._extract_good_epochs(
+                orig_cleaned_dataset, len_epoch, vec_idx_good_epochs
+            )
 
             return epoched_orig_cleaned_dataset, orig_cleaned_dataset, epoched_cleaned_dataset, cleaned_dataset
 
@@ -1200,7 +1214,7 @@ class Dataset:
             plt.semilogy(f_avg_raw_set, pxx_avg_raw_set, 'C1-', label='Raw')
             if epoched_eval_dataset_set is not None:
                 f_avg_eval_set, pxx_avg_eval_set, _, _ = compute_psd(epoched_eval_dataset_set)
-                plt.semilogy(f_avg_eval_set, pxx_avg_eval_set, 'C2--', label='OBS')
+                plt.semilogy(f_avg_eval_set, pxx_avg_eval_set, 'C2--', label=str_eval or 'eval')
             plt.semilogy(f_avg_cleaned_set, pxx_avg_cleaned_set, 'C3--', label='BCGNet')
 
             plt.xlabel('Frequency (Hz)')

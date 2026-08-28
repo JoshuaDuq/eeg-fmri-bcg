@@ -1,4 +1,4 @@
-"""Run AAS and/or BCGNet, or compare folders that already exist."""
+"""Plot Raw vs AAS vs BCGNet. Optionally generate a method first."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 from ..aas_batch import run_aas_batch
 from .config import CompareConfig
 from .pairs import RecordingTriple, pair_recordings
-from .plots import load_bcgnet_mat, load_fastr, metrics_row, plot_epoch, plot_psd
+from .plots import load_fastr, metrics_row, plot_epoch, plot_psd
 
 
 def run_comparison(config: CompareConfig) -> list[dict]:
@@ -42,8 +42,8 @@ def run_comparison(config: CompareConfig) -> list[dict]:
         traces = _load_traces(triple)
         if "Raw" not in traces:
             continue
-        if "AAS" not in traces and "BCGNet" not in traces:
-            print(f"skip {triple.bids_id} {triple.stem}: no AAS or BCGNet file")
+        if not any(name in traces for name in ("AAS", "BCGNet")):
+            print(f"skip {triple.bids_id} {triple.stem}: no cleaned files")
             continue
         prefix = fig_root / triple.bids_id / f"run{triple.idx_run}"
         plot_psd(
@@ -63,12 +63,17 @@ def run_comparison(config: CompareConfig) -> list[dict]:
             ),
         )
         rows.append(
-            metrics_row(triple, traces, max_hz=config.plot.psd_max_hz)
+            metrics_row(
+                triple,
+                traces,
+                max_hz=config.plot.psd_max_hz,
+                window_seconds=config.aas.window_seconds,
+            )
         )
         print(
             f"compared {triple.bids_id} run {triple.idx_run} "
             f"aas={triple.aas_vhdr is not None} "
-            f"bcgnet={triple.bcgnet_mat is not None}"
+            f"bcgnet={triple.bcgnet_vhdr is not None}"
         )
     _write_summary(config.paths.output_root, rows)
     return rows
@@ -87,11 +92,11 @@ def _load_traces(triple: RecordingTriple) -> dict:
             traces["AAS"] = load_fastr(triple.aas_vhdr)
         except Exception as error:
             print(f"failed to load AAS {triple.aas_vhdr}: {error}")
-    if triple.bcgnet_mat is not None:
+    if triple.bcgnet_vhdr is not None:
         try:
-            traces["BCGNet"] = load_bcgnet_mat(triple.bcgnet_mat, raw)
+            traces["BCGNet"] = load_fastr(triple.bcgnet_vhdr)
         except Exception as error:
-            print(f"failed to load BCGNet {triple.bcgnet_mat}: {error}")
+            print(f"failed to load BCGNet {triple.bcgnet_vhdr}: {error}")
     return traces
 
 

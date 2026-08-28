@@ -1,17 +1,15 @@
 from pathlib import Path
 
-import numpy as np
-import scipy.io as sio
-
 from bcgnet.aas_batch import aas_output_vhdr
 from bcgnet.compare.config import load_compare_config
-from bcgnet.compare.pairs import find_bcgnet_mat, pair_recordings
+from bcgnet.compare.pairs import bcgnet_output_vhdr, pair_recordings
+from bcgnet.export import bcgnet_output_vhdr as export_bcgnet_output_vhdr
 
 
 def _write_compare_yaml(tmp_path: Path) -> Path:
     fastr = tmp_path / "fastr" / "sub-0000"
     aas = tmp_path / "aas" / "sub-0000"
-    net = tmp_path / "bcgnet" / "sub0000"
+    net = tmp_path / "bcgnet" / "sub-0000"
     fastr.mkdir(parents=True)
     aas.mkdir(parents=True)
     net.mkdir(parents=True)
@@ -23,7 +21,10 @@ def _write_compare_yaml(tmp_path: Path) -> Path:
         "Brain Vision Data Exchange Header File Version 1.0\n" + ("x" * 120),
         encoding="utf-8",
     )
-    sio.savemat(net / "sub0000_r01_bcgnet.mat", {"data": np.zeros((2, 10))})
+    (net / "BaselineEEG_sub0000_fastr_bcgnet.vhdr").write_text(
+        "Brain Vision Data Exchange Header File Version 1.0\n" + ("x" * 120),
+        encoding="utf-8",
+    )
     yaml_text = f"""
 paths:
   fastr_root: {tmp_path / "fastr"}
@@ -74,8 +75,8 @@ def test_pair_recordings_matches_existing_folders(tmp_path: Path) -> None:
     triple = triples[0]
     assert triple.bids_id == "sub-0000"
     assert triple.aas_vhdr is not None
-    assert triple.bcgnet_mat is not None
-    assert triple.bcgnet_mat.name == "sub0000_r01_bcgnet.mat"
+    assert triple.bcgnet_vhdr is not None
+    assert triple.bcgnet_vhdr.name == "BaselineEEG_sub0000_fastr_bcgnet.vhdr"
 
 
 def test_aas_output_name_matches_gapfix_layout(tmp_path: Path) -> None:
@@ -84,10 +85,21 @@ def test_aas_output_name_matches_gapfix_layout(tmp_path: Path) -> None:
     assert out.name == "BaselineEEG_sub0000_fastr_bcg.vhdr"
 
 
-def test_find_bcgnet_mat_nested_layout(tmp_path: Path) -> None:
-    nested = tmp_path / "sub0000" / "sub0000"
-    nested.mkdir(parents=True)
-    target = nested / "sub0000_r02_bcgnet.mat"
-    target.write_bytes(b"x")
-    found = find_bcgnet_mat(tmp_path, "sub0000", 2)
-    assert found == target
+def test_find_bcgnet_vhdr_matches_export_name(tmp_path: Path) -> None:
+    src = (
+        tmp_path
+        / "fastr"
+        / "sub-0001"
+        / "ThermalPainEEGFMRI_run2_sub0001_fastr.vhdr"
+    )
+    expected = (
+        tmp_path
+        / "bcgnet"
+        / "sub-0001"
+        / "ThermalPainEEGFMRI_run2_sub0001_fastr_bcgnet.vhdr"
+    )
+    expected.parent.mkdir(parents=True)
+    expected.write_text("x" * 80, encoding="utf-8")
+    found = bcgnet_output_vhdr(tmp_path / "bcgnet", "sub-0001", src)
+    assert found == expected
+    assert found == export_bcgnet_output_vhdr(tmp_path / "bcgnet", "sub-0001", src)

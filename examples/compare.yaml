@@ -1,11 +1,12 @@
-# Compare FASTR (gradient-corrected) vs AAS vs BCGNet.
-# run.aas / run.bcgnet false = use the folders as already processed.
+# Overlay FASTR vs AAS vs BCGNet.
+# Keep run.aas / run.bcgnet false unless you want this command to generate
+# a method first (same code as `bcgnet aas` / `bcgnet run`).
 
 paths:
   fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python
   aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcg_gapfix
-  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcgnet_trial/cleaned_data
-  output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare
+  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
+  output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v2
 
 run:
   aas: false
@@ -39,7 +40,7 @@ plot:
   channel: Cz
   epoch_start_seconds: 10
   epoch_seconds: 3
-  psd_max_hz: 30
+  psd_max_hz: 100
 
 subjects:
   include: []
