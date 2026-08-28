@@ -1,21 +1,16 @@
-# Agent instructions for BCGNet-Python
+# Agent instructions
 
-Two correction libraries live here and must stay separate:
+Keep the two correction stacks separate:
 
-- `src/bcgnet/` — GRU ECG→BCG (`bcgnet run`); no AAS load. Writes
-  `training_history.png` and Raw vs BCGNet (before/after) PSDs.
-- `src/bcg_correction/` — independent R detection + AAS (`bcgnet aas`)
-- `src/bcgnet/compare/` — the only Raw vs AAS vs BCGNet overlay; may *call*
-  `run`/`aas`, never mix their internals
+- `src/bcgnet/` — product. `bcgnet run` trains the GRU, write-back subtracts BCG from 1 kHz FASTR EEG, writes BrainVision. No AAS load. Figures: `training_history.png` and Raw vs BCGNet PSD.
+- `src/bcg_correction/` — independent R detection and AAS (`bcgnet aas` / `bcg-correct`). PCA-OBS exists in this library; do not wire it into study compare.
+- `src/bcgnet/compare/` — the only Raw vs AAS vs BCGNet overlay. May call `run`/`aas`; do not mix internals.
 
-FASTR-Python stays gradient-only (`mri-correct`).
+FASTR-Python is gradient-only (`mri-correct`).
 
-Prefer the Session API in `src/bcgnet/vendor/` over rewriting the network.
-Keep vendor patches to compatibility with modern TensorFlow/Keras/MNE; record
-them in `docs/UPSTREAM.md`.
+Prefer the vendor Session API in `src/bcgnet/vendor/` over rewriting the network. Record compatibility patches in `docs/UPSTREAM.md`.
 
-Study knobs belong in `config.yaml`, not environment variables or hardcoded
-paths in Python.
+Study knobs belong in YAML (`config.yaml`, `examples/compare.yaml`), not environment variables or hardcoded paths.
 
 ```text
 uv run pytest

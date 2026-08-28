@@ -1,3 +1,5 @@
+# BCGNet training. Copy and set paths. AAS comparison is examples/compare.yaml.
+
 paths:
   fastr_root: /path/to/fastr_python
   output_root: /path/to/fastr_python_bcgnet

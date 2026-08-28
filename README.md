@@ -1,71 +1,54 @@
 # EEG-fMRI-BCG
 
-One project, two BCG methods, plus a comparison command.
+BCGNet GRU (ECG→BCG) on FASTR-corrected EEG. AAS is a separate comparator, not part of training.
 
-| Command | What it does | Figures |
-|---------|--------------|---------|
-| `bcgnet run` | Train one GRU per subject, write `*_fastr_bcgnet.vhdr` | `training_history.png` and before/after PSD |
-| `bcgnet aas` | AAS on every FASTR recording | none |
-| `bcgnet compare` | Overlay FASTR vs AAS vs BCGNet | PSD + epoch + `compare_summary.csv` |
+| Command | Config | Output |
+|---------|--------|--------|
+| `bcgnet discover` | `config.yaml` | subject/run list |
+| `bcgnet run` | `config.yaml` | `*_fastr_bcgnet.vhdr`, `training_history.png`, before/after PSD |
+| `bcgnet aas` | `examples/compare.yaml` | `*_fastr_bcg.vhdr` |
+| `bcgnet compare` | `examples/compare.yaml` | Raw/AAS/BCGNet PSD and epoch plots, `compare_summary.csv` |
 
-They do not share correction code. Training never loads AAS. Before/after PSDs
-are Raw vs BCGNet only; AAS overlays stay in `bcgnet compare`.
+Python 3.12: `uv sync`
 
-## Install
-
-Python 3.12.
-
-```text
-uv sync
-```
-
-## BCGNet (GRU)
+## BCGNet
 
 ```text
 bcgnet discover --config config.yaml
 bcgnet run --config config.yaml
 ```
 
-Input is FASTR-corrected EEG (gradient gone, BCG still present). One model per
-subject. Details: [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
+Input is FASTR EEG (gradient gone, BCG still present). One model per subject, trained at 100 Hz. The BCG estimate is interpolated and subtracted from the original 1 kHz EEG (`bcgnet.writeback`), so ECG and line noise are unchanged. Channel names match the FASTR file (e.g. `FPz`).
 
-## AAS (bundled BCG-Python)
+`save_figures` writes `training_history.png` and a Before/After PSD (Raw vs BCGNet only). AAS overlays are not produced here.
 
-The former BCG-Python library lives in `src/bcg_correction/`. Same YAML as
-before, plus a cohort runner:
+Vendor GRU details and compatibility patches: [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
+
+## AAS
+
+Independent R-peak detection and average artifact subtraction live in `src/bcg_correction/`. Outputs are `*_fastr_bcg.vhdr`.
 
 ```text
-bcg-correct correct-bcg --config examples/aas/bcg_correction.yml
 bcgnet aas --config examples/compare.yaml
+bcg-correct correct-bcg --config examples/aas/bcg_correction.yml
 ```
 
-Method notes: [`docs/aas/bcg_methods.md`](docs/aas/bcg_methods.md).
+Method notes: [`docs/aas/bcg_methods.md`](docs/aas/bcg_methods.md). That library also implements PCA-OBS; **study compare does not use it.**
 
-## Compare the two
+## Compare
 
-With both `run.aas` and `run.bcgnet` false, this only plots folders you already
-have (`bcgnet run` / `bcgnet aas`):
+With `run.aas` and `run.bcgnet` false, plots folders you already have:
 
 ```text
 bcgnet compare --config examples/compare.yaml
 ```
 
-That is the only Raw / AAS / BCGNet overlay.
-
-It reads:
-
 - FASTR: `paths.fastr_root`
 - AAS: `paths.aas_root` (`*_fastr_bcg.vhdr`)
 - BCGNet: `paths.bcgnet_root` (`*_fastr_bcgnet.vhdr`)
 
-and writes PSD/epoch overlays plus `compare_summary.csv` (delta/theta/alpha
-remaining, heartbeat-locked residual, `prefer_aas` when BCGNet adds power or
-worsens locked residual).
-
-To generate a method first, set `run.aas` and/or `run.bcgnet`.
+`prefer_aas` is true when BCGNet remaining power in delta, theta, or alpha is `> 1`, or heartbeat-locked residual is worse than raw. Alpha-peak collapse is reported but does not set that flag.
 
 ## Citation
 
-McIntosh, J. R., Yao, J., Hong, L., Faller, J., & Sajda, P. (2020).
-Ballistocardiogram artifact reduction in simultaneous EEG-fMRI using deep
-learning. IEEE Transactions on Biomedical Engineering.
+McIntosh, J. R., Yao, J., Hong, L., Faller, J., & Sajda, P. (2020). Ballistocardiogram artifact reduction in simultaneous EEG-fMRI using deep learning. IEEE Transactions on Biomedical Engineering.

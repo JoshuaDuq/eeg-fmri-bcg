@@ -1,4 +1,4 @@
-"""Command-line entry point for BCGNet and AAS comparison."""
+"""CLI: bcgnet discover | run | aas | compare."""
 
 from __future__ import annotations
 
@@ -78,9 +78,7 @@ def _run_compare(arguments: argparse.Namespace) -> int:
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bcgnet",
-        description=(
-            "BCGNet GRU training, bundled AAS, and Raw/AAS/BCGNet comparison."
-        ),
+        description="Train BCGNet, run AAS, or compare Raw vs AAS vs BCGNet.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     discover = commands.add_parser(

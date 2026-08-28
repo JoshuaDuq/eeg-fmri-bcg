@@ -1,4 +1,4 @@
-"""Batch AAS/PCA-OBS correction using the bundled bcg_correction library."""
+"""Batch AAS on FASTR recordings via bcg_correction."""
 
 from __future__ import annotations
 

@@ -1,8 +1,9 @@
-# Independent cardiac detection and BCG benchmark
+# Independent cardiac detection and BCG correction
 
-This stage is deliberately independent of BrainVision Analyzer's cardiac markers. It
-accepts the BrainVision recording produced by the FASTR scanner-gradient correction,
-whose source is the unmarked raw recording, and detects cardiac events from the ECG
+Library for `src/bcg_correction/` (`bcgnet aas` / `bcg-correct`). `bcgnet run` does not call it. Study compare overlays existing AAS BrainVision (`*_fastr_bcg.vhdr`). PCA-OBS is implemented below; it is not a study compare arm.
+
+This stage is independent of BrainVision Analyzer's cardiac markers. It
+accepts FASTR gradient-corrected BrainVision and detects cardiac events from the ECG
 samples alone.
 
 ## Input boundary
