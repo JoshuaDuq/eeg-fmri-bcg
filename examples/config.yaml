@@ -10,6 +10,12 @@ compute:
   workers: 2
   cpu_count: 10
   threads_per_worker: auto
+  # Optional. "cpu" (default), "gpu", or "gpu:<index>" to pick a card on a
+  # multi-GPU host. A gpu run fails immediately if TensorFlow sees no card,
+  # rather than training for hours on the CPU by accident. On Windows that
+  # needs WSL2 with tensorflow[and-cuda] -- TensorFlow has shipped no
+  # native-Windows GPU build since 2.10.
+  device: cpu
 
 training:
   # Cap is the paper YAML (2500). Early stopping decides. Keep batch 16.

@@ -26,9 +26,31 @@ class PathConfig:
 
 @dataclass(frozen=True, slots=True)
 class ComputeConfig:
+    """How the cohort is spread over this machine.
+
+    :param device: ``"cpu"``, ``"gpu"``, or ``"gpu:<index>"`` to pick a card on
+        a multi-GPU host. Training is CPU-only unless this says otherwise.
+    """
+
     workers: int
     cpu_count: int
     threads_per_worker: int
+    device: str
+
+    @property
+    def use_gpu(self) -> bool:
+        return self.device != "cpu"
+
+    @property
+    def cuda_visible_devices(self) -> str:
+        """What ``CUDA_VISIBLE_DEVICES`` must be for this device.
+
+        ``-1`` hides every card, which is what keeps a CPU run on the CPU.
+        """
+        if not self.use_gpu:
+            return "-1"
+        _, _, index = self.device.partition(":")
+        return index or "0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +112,11 @@ _TOP = frozenset(
 #: Sections a configuration may omit, so adding one never breaks an existing file.
 _OPTIONAL_TOP = frozenset({"naming"})
 _PATH_KEYS = frozenset({"fastr_root", "output_root"})
-_COMPUTE_KEYS = frozenset({"workers", "cpu_count", "threads_per_worker"})
+_COMPUTE_KEYS = frozenset(
+    {"workers", "cpu_count", "threads_per_worker", "device"}
+)
+#: Compute keys a configuration may omit, so adding one never breaks an existing file.
+_OPTIONAL_COMPUTE = {"threads_per_worker": "auto", "device": "cpu"}
 _TRAINING_KEYS = frozenset(
     {
         "num_epochs",
@@ -174,6 +200,7 @@ def load_config(path: str | Path) -> BCGNetConfig:
             workers=workers,
             cpu_count=cpu_count,
             threads_per_worker=threads_per_worker,
+            device=_device(compute),
         ),
         training=TrainingConfig(
             num_epochs=_integer(training, "num_epochs", minimum=1),
@@ -224,6 +251,22 @@ def run_pattern(naming: Mapping[str, object]) -> str:
     return pattern
 
 
+def _device(compute: Mapping[str, object]) -> str:
+    """Validate ``compute.device``, the knob that puts training on a GPU."""
+    value = compute["device"]
+    spelling = value.strip().lower() if isinstance(value, str) else value
+    if spelling in {"cpu", "gpu"}:
+        return spelling
+    if isinstance(spelling, str):
+        head, _, index = spelling.partition(":")
+        if head == "gpu" and index.isdigit():
+            return spelling
+    raise ConfigurationError(
+        "compute.device must be 'cpu', 'gpu', or 'gpu:<index>', "
+        f"not {value!r}"
+    )
+
+
 def _section(
     root: Mapping[str, object],
     name: str,
@@ -237,10 +280,10 @@ def _section(
     if name in _OPTIONAL_TOP:
         required = frozenset()
     if name == "compute":
-        required = expected - {"threads_per_worker"}
-        if "threads_per_worker" not in values:
-            values = dict(values)
-            values["threads_per_worker"] = "auto"
+        required = expected - set(_OPTIONAL_COMPUTE)
+        values = dict(values)
+        for key, fallback in _OPTIONAL_COMPUTE.items():
+            values.setdefault(key, fallback)
     _require(values, required, name)
     return values
 

@@ -8,10 +8,11 @@ import re
 import sys
 import time
 import traceback
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from .config import BCGNetConfig, ConfigurationError
+from .config import BCGNetConfig, ComputeConfig, ConfigurationError
 from .discovery import iter_subjects
 from .runtime import VENDOR_ROOT, prepare_vendor_imports
 
@@ -123,15 +124,55 @@ def _band_metrics(dataset, vendor_cfg, mode: str = "test") -> list[dict]:
     return rows
 
 
+def worker_environment(config: BCGNetConfig) -> dict[str, str]:
+    """The environment one training worker needs, from ``compute``.
+
+    ``process_subject`` applies this before importing TensorFlow, which reads
+    all of it once at import and never again.
+
+    A GPU run also asks for memory growth. The vendor tree requests it through
+    a TF1 ``ConfigProto`` that Keras 3 ignores, so this variable is what
+    actually takes effect -- without it the first worker claims the whole card
+    and every other worker fails to start.
+    """
+    threads = str(config.compute.threads_per_worker)
+    environment = {
+        "CUDA_VISIBLE_DEVICES": config.compute.cuda_visible_devices,
+        "OMP_NUM_THREADS": threads,
+        "TF_NUM_INTRA_OP_THREADS": threads,
+        "TF_NUM_INTER_OP_THREADS": "1",
+        "TF_ENABLE_ONEDNN_OPTS": "0",
+    }
+    if config.compute.use_gpu:
+        environment["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+    return environment
+
+
+def require_device(compute: ComputeConfig, visible_gpus: Sequence[object]) -> None:
+    """Fail a GPU run that TensorFlow cannot actually put on a GPU.
+
+    The trap this closes is silent: TensorFlow has shipped no native-Windows
+    GPU build since 2.10, so ``pip install tensorflow`` there trains on CPU
+    without complaining. A cohort would finish many hours later having never
+    touched the card.
+
+    This is checked inside the worker rather than once up front on purpose.
+    Listing devices initialises the CUDA driver, and on Linux -- where
+    ``ProcessPoolExecutor`` forks -- a CUDA context does not survive the fork.
+    """
+    if compute.use_gpu and not visible_gpus:
+        raise ConfigurationError(
+            f"compute.device is {compute.device!r} but TensorFlow reports no GPU. "
+            "TensorFlow has had no native-Windows GPU build since 2.10; on "
+            "Windows run under WSL2 with tensorflow[and-cuda]. Set "
+            "compute.device: cpu to train on the CPU instead."
+        )
+
+
 def process_subject(spec: dict, config: BCGNetConfig) -> dict:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     os.environ.setdefault("MPLBACKEND", "Agg")
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-    threads = str(config.compute.threads_per_worker)
-    os.environ["OMP_NUM_THREADS"] = threads
-    os.environ["TF_NUM_INTRA_OP_THREADS"] = threads
-    os.environ["TF_NUM_INTER_OP_THREADS"] = "1"
-    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+    os.environ.update(worker_environment(config))
 
     prepare_vendor_imports()
 
@@ -220,6 +261,8 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
 
         import tensorflow as tf
 
+        require_device(config.compute, tf.config.list_physical_devices("GPU"))
+
         try:
             tf.config.threading.set_intra_op_parallelism_threads(
                 config.compute.threads_per_worker
@@ -234,6 +277,7 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         print(
             f"=== {bids_id} recordings={vec_idx_run} "
             f"runs={run_count(spec)} tf={tf.__version__} "
+            f"device={config.compute.device} "
             f"threads={config.compute.threads_per_worker} "
             f"epochs={config.training.num_epochs} batch={config.training.batch_size}"
         )
@@ -408,6 +452,7 @@ def run_cohort(config: BCGNetConfig, config_path: Path) -> list[dict]:
     subjects = discover_subjects(config)
     print(
         f"cohort: {len(subjects)} subjects, workers={config.compute.workers}, "
+        f"device={config.compute.device}, "
         f"threads/worker={config.compute.threads_per_worker}"
     )
     for spec in subjects:

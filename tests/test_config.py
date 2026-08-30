@@ -129,3 +129,45 @@ def test_run_pattern_without_a_capture_group_is_rejected(tmp_path: Path) -> None
 def test_unknown_naming_field_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="unknown field"):
         load_config(_write_config(tmp_path, naming={"task_pattern": "x"}))
+
+
+def _with_device(tmp_path: Path, device: str) -> Path:
+    return _write_config(
+        tmp_path,
+        compute={
+            "workers": 2,
+            "cpu_count": 10,
+            "threads_per_worker": "auto",
+            "device": device,
+        },
+    )
+
+
+def test_device_defaults_to_cpu_when_absent(tmp_path: Path) -> None:
+    """A config predating the knob keeps training on CPU, as it always did."""
+    config = load_config(_write_config(tmp_path))
+    assert config.compute.device == "cpu"
+    assert config.compute.use_gpu is False
+    assert config.compute.cuda_visible_devices == "-1"
+
+
+def test_device_gpu_selects_the_first_card(tmp_path: Path) -> None:
+    config = load_config(_with_device(tmp_path, "gpu"))
+    assert config.compute.use_gpu is True
+    assert config.compute.cuda_visible_devices == "0"
+
+
+def test_device_gpu_index_selects_that_card(tmp_path: Path) -> None:
+    config = load_config(_with_device(tmp_path, "gpu:1"))
+    assert config.compute.use_gpu is True
+    assert config.compute.cuda_visible_devices == "1"
+
+
+def test_unknown_device_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match=r"compute\.device"):
+        load_config(_with_device(tmp_path, "cuda"))
+
+
+def test_device_gpu_with_a_non_numeric_index_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match=r"compute\.device"):
+        load_config(_with_device(tmp_path, "gpu:first"))

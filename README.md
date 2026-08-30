@@ -46,6 +46,27 @@ Input is FASTR EEG (gradient gone, BCG still present). One model per subject, tr
 
 BCGNet uses no cardiac markers: the vendor dataset cuts fixed 3 s epochs and learns ECG→EEG directly, so R-peak detection never enters this path.
 
+### CPU or GPU
+
+Training is CPU-only unless `compute.device` says otherwise:
+
+```yaml
+compute:
+  workers: 1
+  device: gpu      # or "gpu:1" to pick a card on a multi-GPU host
+```
+
+A `gpu` run fails immediately when TensorFlow reports no card, rather than
+spending hours on the CPU having been asked for the GPU. That failure is the
+common case on Windows: TensorFlow has shipped no native-Windows GPU build
+since 2.10, so `pip install tensorflow` there is CPU-only and silent about it.
+Run under WSL2 with `tensorflow[and-cuda]`.
+
+Every GPU worker also gets `TF_FORCE_GPU_ALLOW_GROWTH`. The vendor tree asks
+for memory growth through a TF1 `ConfigProto` that Keras 3 ignores, so without
+it the first worker claims the whole card and the rest fail to start. With it,
+the model is small enough (55k parameters) that several workers share one card.
+
 `save_figures` writes `training_history.png` and a Before/After PSD (Raw vs BCGNet only). Comparator overlays are not produced here.
 
 Vendor GRU details and compatibility patches: [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
