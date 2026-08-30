@@ -13,6 +13,8 @@ dist/
 *.swp
 .coverage
 htmlcov/
+# Agent scratch plans. Working notes, not part of the study record.
+docs/superpowers/
 
 # Study data and generated research outputs.
 data/
