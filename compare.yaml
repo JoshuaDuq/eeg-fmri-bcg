@@ -16,6 +16,12 @@ paths:
   bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
   output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v2
 
+# Recordings are corrected independently, so this is simply how many run at
+# once. Four matches this machine's performance cores; each worker holds one
+# 1 kHz recording in memory, so raise it against RAM, not core count.
+compute:
+  workers: 4
+
 run:
   aas: false
   pca_obs: false

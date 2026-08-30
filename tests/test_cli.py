@@ -68,7 +68,7 @@ def test_split_fractions_must_sum_to_one(tmp_path: Path) -> None:
         load_config(path)
 
 
-def _write_compare_config(tmp_path: Path) -> Path:
+def _write_compare_config(tmp_path: Path, *, workers: int | None = None) -> Path:
     document = {
         "paths": {
             "fastr_root": str(tmp_path / "fastr"),
@@ -107,6 +107,8 @@ def _write_compare_config(tmp_path: Path) -> Path:
         },
         "subjects": {"include": [], "exclude": []},
     }
+    if workers is not None:
+        document["compute"] = {"workers": workers}
     path = tmp_path / "compare.yaml"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     return path
@@ -147,3 +149,27 @@ def test_aas_command_still_writes_into_the_aas_root(
     assert main(["aas", "--config", str(path)]) == 0
     assert captured["arm"] is AAS
     assert captured["output_root"] == (tmp_path / "aas").resolve()
+
+
+def test_comparator_commands_correct_recordings_in_parallel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``compute.workers`` must reach the batch, or the arms stay single-core."""
+    captured = _capture_batch(monkeypatch)
+    path = _write_compare_config(tmp_path, workers=4)
+
+    assert main(["aas", "--config", str(path)]) == 0
+
+    assert captured["workers"] == 4
+
+
+def test_comparator_commands_stay_serial_without_a_compute_block(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An existing compare config must keep the batch in one process."""
+    captured = _capture_batch(monkeypatch)
+    path = _write_compare_config(tmp_path)
+
+    assert main(["pca-obs", "--config", str(path)]) == 0
+
+    assert captured["workers"] == 1

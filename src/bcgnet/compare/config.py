@@ -57,6 +57,17 @@ class RunFlags:
 
 
 @dataclass(frozen=True, slots=True)
+class CompareCompute:
+    """How much of the machine the bounded arms may use.
+
+    Recordings are corrected independently, so this is simply how many of them
+    run at once. One keeps the batch in a single process, as it always was.
+    """
+
+    workers: int
+
+
+@dataclass(frozen=True, slots=True)
 class PlotSettings:
     channel: str
     epoch_start_seconds: float
@@ -67,6 +78,7 @@ class PlotSettings:
 @dataclass(frozen=True, slots=True)
 class CompareConfig:
     paths: ComparePaths
+    compute: CompareCompute
     run: RunFlags
     correction: CorrectionSettings
     bcgnet_config: Path | None
@@ -78,7 +90,16 @@ class CompareConfig:
 
 
 _TOP = frozenset(
-    {"paths", "run", "correction", "bcgnet_config", "plot", "subjects", "naming"}
+    {
+        "paths",
+        "compute",
+        "run",
+        "correction",
+        "bcgnet_config",
+        "plot",
+        "subjects",
+        "naming",
+    }
 )
 # Keys that moved, so a pre-PCA-OBS config fails with the fix rather than a
 # bare "unknown field".
@@ -87,6 +108,7 @@ _PATH_KEYS = frozenset(
     {"fastr_root", "aas_root", "pca_obs_root", "bcgnet_root", "output_root"}
 )
 _RUN_KEYS = frozenset({"aas", "pca_obs", "bcgnet"})
+_COMPUTE_KEYS = frozenset({"workers"})
 _PLOT_KEYS = frozenset(
     {"channel", "epoch_start_seconds", "epoch_seconds", "psd_max_hz"}
 )
@@ -162,6 +184,9 @@ def load_compare_config(path: str | Path) -> CompareConfig:
     # ``naming`` is optional, so adding it never invalidates an existing config.
     naming = _mapping(document.get("naming", {}), "naming")
     _reject_unknown_keys(naming, _NAMING_KEYS, "naming")
+    # ``compute`` likewise: absent means the serial batch this file used to run.
+    compute = _mapping(document.get("compute", {}), "compute")
+    _reject_unknown_keys(compute, _COMPUTE_KEYS, "compute")
     correction = _mapping(document["correction"], "correction")
     _require_keys(correction, _CORRECTION_KEYS, "correction")
     detector = _mapping(correction["detector"], "correction.detector")
@@ -185,6 +210,7 @@ def load_compare_config(path: str | Path) -> CompareConfig:
     template = _two_floats(detector, "template_window_seconds")
     window = _two_floats(correction, "window_seconds")
     return CompareConfig(
+        compute=CompareCompute(workers=_workers(compute)),
         paths=ComparePaths(
             fastr_root=_path(paths, "fastr_root", base),
             aas_root=_path(paths, "aas_root", base),
@@ -237,6 +263,18 @@ def load_compare_config(path: str | Path) -> CompareConfig:
         exclude=_string_list(subjects, "exclude"),
         run_pattern=_run_pattern(naming),
     )
+
+
+def _workers(compute: Mapping[str, object]) -> int:
+    """Validate ``compute.workers``, defaulting to the historical serial batch."""
+    if "workers" not in compute:
+        return 1
+    value = compute["workers"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigurationError(
+            "compute.workers must be an integer greater than or equal to 1"
+        )
+    return value
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

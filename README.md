@@ -61,6 +61,8 @@ bcgnet pca-obs --config compare.yaml
 
 Each arm writes to its own root with its own filename suffix (`_bcg` for AAS, `_pcaobs` for PCA-OBS), so the two never overwrite each other. Method notes: [`docs/aas/bcg_methods.md`](docs/aas/bcg_methods.md).
 
+Recordings are corrected independently, so `compute.workers` in `compare.yaml` sets how many run at once. A config without that section stays serial, as the batch always was. Each worker holds one 1 kHz recording in memory, so raise it against RAM rather than core count.
+
 The single-recording entry point is unchanged:
 
 ```text

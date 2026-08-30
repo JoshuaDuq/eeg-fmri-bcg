@@ -74,6 +74,7 @@ def _run_comparator(arguments: argparse.Namespace) -> int:
         settings=config.correction,
         include=config.include,
         exclude=config.exclude,
+        workers=config.compute.workers,
     )
     n_ok = sum(1 for row in rows if row["status"] in {"ok", "skipped"})
     print(f"{arm.label} DONE ok_or_skipped={n_ok}/{len(rows)}")

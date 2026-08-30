@@ -23,6 +23,7 @@ def _write_compare_yaml(
     arms: tuple[str, ...],
     names: tuple[str, ...] = ("BaselineEEG_sub0000_fastr.vhdr",),
     naming: str = "",
+    extra: str = "",
 ) -> Path:
     """Lay out a cohort holding only ``arms``, then a config that points at it."""
     fastr = tmp_path / "fastr" / "sub-0000"
@@ -72,7 +73,7 @@ plot:
 subjects:
   include: []
   exclude: []
-{naming}"""
+{naming}{extra}"""
     path = tmp_path / "compare.yaml"
     path.write_text(yaml_text, encoding="utf-8")
     return path
@@ -185,3 +186,25 @@ def test_compare_accepts_a_study_specific_run_pattern(tmp_path: Path) -> None:
     (recording,) = pair_recordings(config)
     assert recording.run == 3
     assert recording.label == "run3"
+
+
+def test_compare_config_reads_a_worker_count_for_the_bounded_arms(
+    tmp_path: Path,
+) -> None:
+    """``compute.workers`` is how many recordings an arm corrects at once."""
+    config = load_compare_config(
+        _write_compare_yaml(
+            tmp_path, arms=(), extra="compute:\n  workers: 4\n"
+        )
+    )
+
+    assert config.compute.workers == 4
+
+
+def test_compare_config_without_a_compute_block_stays_serial(
+    tmp_path: Path,
+) -> None:
+    """Configs written before this knob existed must keep correcting serially."""
+    config = load_compare_config(_write_compare_yaml(tmp_path, arms=()))
+
+    assert config.compute.workers == 1

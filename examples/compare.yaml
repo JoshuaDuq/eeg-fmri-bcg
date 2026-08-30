@@ -13,6 +13,12 @@ paths:
   bcgnet_root: /path/to/fastr_python_bcgnet
   output_root: /path/to/bcg_compare
 
+# Recordings are corrected independently, so this is simply how many run at
+# once. Four matches this machine's performance cores; each worker holds one
+# 1 kHz recording in memory, so raise it against RAM, not core count.
+compute:
+  workers: 4
+
 run:
   aas: false
   pca_obs: false

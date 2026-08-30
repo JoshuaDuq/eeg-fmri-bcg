@@ -29,6 +29,7 @@ def run_comparison(config: CompareConfig) -> list[dict]:
             settings=config.correction,
             include=config.include,
             exclude=config.exclude,
+            workers=config.compute.workers,
         )
     if config.run.bcgnet:
         if config.bcgnet_config is None:
