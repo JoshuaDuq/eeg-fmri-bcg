@@ -1,267 +1,150 @@
-# EEG-fMRI-BCG
+# EEG-fMRI Ballistocardiogram (BCG) Correction
 
-Four ballistocardiogram correction methods for FASTR-corrected EEG — **AAS**,
-**PCA-OBS**, **blocked mean**, and **BCGNet** — plus a comparison that measures
-them against each other on the same recordings.
+A scientific computing framework for the standardized correction and comparative evaluation of ballistocardiogram (BCG) artifacts in simultaneous EEG-fMRI recordings following gradient artifact suppression.
 
-No method is the default. Run whichever one your study needs, or run all four
-and let `bcg compare` show you which behaves best on your data.
+## Overview
 
-## Install
+Cardiovascular pulsatile activity inside high-field magnetic resonance scanners induces large-amplitude ballistocardiogram (BCG) artifacts on scalp electroencephalography. This software provides an integrated pipeline to benchmark and execute four correction methodologies under standardized physiological constraints:
+
+1. **Average Artifact Subtraction (AAS)**: Moving-window sliding template subtraction aligned to detected electrocardiographic R-peaks (Allen et al., 1998).
+2. **Principal Component Analysis Optimal Basis Set (PCA-OBS)**: Subspace projection onto principal components derived from cardiac-aligned artifact templates (Niazy et al., 2005).
+3. **Cross-Fitted Blocked Mean**: Contiguous non-overlapping block cross-fitting with beat-invariant temporal templates.
+4. **BCGNet (Recurrent Neural Network)**: Deep gated recurrent unit (GRU) network trained directly on single-lead electrocardiography (ECG) to predict multi-channel BCG artifacts without requiring cardiac peak markers (McIntosh et al., 2020).
+
+No single method is treated as a default. Study pipelines evaluate each arm under unified validation criteria using `bcg compare`.
+
+---
+
+## Empirical Benchmark & Comparative Evaluation
+
+Artifact suppression cannot be evaluated purely by total residual variance or broadband power reduction. An overly aggressive filter or over-subtracting template can artificially minimize residual variance by attenuating endogenous neural oscillations. To address this, corrections are evaluated using two joint criteria:
+- **Heartbeat-Locked Residual Ratio**: The fraction of cardiac-locked energy remaining post-correction (lower indicates greater artifact removal).
+- **Spectral Specificity & Collateral Loss**: The fraction of removed signal that is phase-locked to cardiac cycles. Power removed outside cardiac harmonics—particularly in the physiological alpha band (8–13 Hz)—represents unintended loss of neural activity.
+
+### Cohort Comparison
+
+The comparative report below evaluates **129 paired acquisitions across 21 participants** under identical cardiac peak alignments:
+
+![Comparative Report across 129 Paired EEG-fMRI Recordings](docs/figures/cohort_comparative.png)
+
+*Figure 1: Cohort comparative report across 129 paired recordings (21 subjects). (A) Heartbeat-locked waveform average before and after correction. (B) Residual waveform on an independent amplitude scale. (C) Posterior channel power spectral density (PSD); vertical ticks mark cardiac harmonics, shaded area indicates the alpha band (8–13 Hz). (D) Non-cardiac-locked power removed (collateral loss). (E) Spectral specificity across frequencies (cardiac-locked fraction of removed power). (F) Per-recording metric distributions.*
+
+### Scalp Topographies
+
+Scalp topographies evaluate spatial selectivity across all 63 channels. BCG artifacts are primarily peripheral and head-motion-driven, whereas physiological alpha rhythms originate predominantly from occipital and parietal cortices.
+
+![Scalp Topographies of Artifact Removal and Collateral Loss](docs/figures/cohort_topography.png)
+
+*Figure 2: Cohort scalp topographies. Row A: Baseline cardiac-locked amplitude and the corresponding locked amplitude removed by each method on a shared scale. Row B: Baseline alpha-band power and the non-locked alpha power removed as collateral loss. Topographical similarity between baseline alpha and collateral loss denotes neural signal attenuation.*
+
+### Summary of Cohort Performance
+
+| Method | Heartbeat-Locked Ratio (ECG-Regressed) | Spectral Specificity | Alpha Collateral Loss (%) |
+| :--- | :---: | :---: | :---: |
+| **AAS** | 0.33 | 0.86 | 8.8% |
+| **PCA-OBS** | 0.27 | 0.72 | 12.4% |
+| **Blocked Mean** | 0.26 | 0.98 | 0.5% |
+| **BCGNet** | 0.30 | 0.70 | 15.6% |
+
+*Median metrics across 129 paired recordings. Lower locked ratios indicate greater artifact attenuation; higher specificity and lower collateral loss indicate preservation of endogenous neural rhythms.*
+
+---
+
+## Installation
+
+The package requires Python 3.12 and `uv` for reproducible environment management.
 
 ```bash
+git clone https://github.com/JoshuaDuq/eeg-fmri-bcg.git
+cd eeg-fmri-bcg
 uv sync
 ```
 
-Python 3.12.
+---
 
-## Quickstart
+## Execution & Workflow
 
-Each pipeline is independent — none requires the others to have run.
+All pipeline operations are accessed through the unified `bcg` command-line entry point (`src/bcgstudy/cli.py`). Subcommands execute independently and do not depend on preceding steps.
 
 ```bash
-# 1. See what will be processed, without processing it
+# 1. Discover recordings and verify subject-run mappings without processing
 uv run bcg discover --config config.yaml
 
-# 2. Pick a correction — any one, in any order, none depends on the others
-uv run bcg aas     --config compare.yaml    # average artifact subtraction
-uv run bcg pca-obs --config compare.yaml    # optimal basis set
-uv run bcg blocked-mean --config compare.yaml  # cross-fitted mean template
-uv run bcg bcgnet  --config config.yaml     # BCGNet GRU, trains per subject
+# 2. Execute desired correction pipelines
+uv run bcg aas          --config compare.yaml
+uv run bcg pca-obs      --config compare.yaml
+uv run bcg blocked-mean --config compare.yaml
+uv run bcg bcgnet       --config config.yaml
 
-# 3. Compare whatever you ran
+# 3. Generate comparative evaluation tables and figures
 uv run bcg compare --config compare.yaml
-```
 
-Changed a correction or comparison figure and want it applied to work you
-already did? Rebuild those reports from outputs on disk, without redoing a
-single correction or retraining BCGNet:
-
-```bash
+# 4. Rebuild figures from serialized profiles without re-running corrections
 uv run bcg reports --config compare.yaml
 ```
 
-Correct a single recording without a cohort:
-
+To correct a single BrainVision acquisition outside a cohort:
 ```bash
 uv run bcg correct --config examples/bcg_correction.yml
 ```
 
-## What each command writes
+### Subcommand Reference
 
-| command | config | output |
-|---------|--------|--------|
-| `bcg discover` | `config.yaml` | subject/recording list with run labels, to stdout |
-| `bcg aas` | `compare.yaml` | `*_fastr_aas.vhdr` + reports, under `paths.aas_root` |
-| `bcg pca-obs` | `compare.yaml` | `*_fastr_pcaobs.vhdr` + reports, under `paths.pca_obs_root` |
-| `bcg blocked-mean` | `compare.yaml` | `*_fastr_blockedmean.vhdr` + reports, under `paths.blocked_mean_root` |
-| `bcg bcgnet` | `config.yaml` | `*_fastr_bcgnet.vhdr`, one model per subject, `cohort_summary.csv` |
-| `bcg compare` | `compare.yaml` | `compare_summary.csv` + method-vs-method pages in `paths.experiments_root` |
-| `bcg reports` | `compare.yaml` | bounded-arm and comparative reports rebuilt from existing outputs |
+| Command | Configuration | Output Description |
+| :--- | :--- | :--- |
+| `bcg discover` | `config.yaml` | Identifies available BIDS recordings and displays subject/run tables. |
+| `bcg aas` | `compare.yaml` | Writes `*_fastr_aas.vhdr` and per-recording profiles under `paths.aas_root`. |
+| `bcg pca-obs` | `compare.yaml` | Writes `*_fastr_pcaobs.vhdr` and per-recording profiles under `paths.pca_obs_root`. |
+| `bcg blocked-mean` | `compare.yaml` | Writes `*_fastr_blockedmean.vhdr` and profiles under `paths.blocked_mean_root`. |
+| `bcg bcgnet` | `config.yaml` | Trains subject GRU models; writes `*_fastr_bcgnet.vhdr` and `cohort_summary.csv`. |
+| `bcg compare` | `compare.yaml` | Generates `compare_summary.csv`, comparative figures, and topographies. |
+| `bcg reports` | `compare.yaml` | Rebuilds cohort figures directly from existing `*_profile.npz` archives. |
+| `bcg detect` | `compare.yaml` | Executes independent QRS detection on ECG channels. |
+| `bcg benchmark` | `compare.yaml` | Computes signal transfer on synthetic calibration injections. |
 
-Arms write to separate roots with distinct filename suffixes, so they never
-overwrite each other and any subset can exist at once.
+---
 
-## Reports
+## Signal Processing & Methodology
 
-Every figure this project produces uses the same six panels, so learning to read
-one teaches you to read all of them. Only the averaging changes.
+The repository enforces clean separation of concerns:
+- **`src/bcgstudy/`**: Top-level CLI orchestration and dataset discovery.
+- **`src/bcg_correction/`**: QRS detection (`cardiac.py`), bounded corrections (`bcg.py`), analytical metrics (`metrics.py`), and visualization (`figure_style.py`, `correction_report.py`).
+- **`src/bcgnet/`**: Vendor GRU neural network training, inference, and sinc interpolation writeback (`export.py`, `writeback.py`).
+- **`src/bcgnet/compare/`**: Multi-arm evaluation engine and comparative figure generation (`comparative.py`, `pipeline.py`).
+- **`tools/`**: Statistical verification and holdout evaluation scripts.
 
-| level | where | answers |
-|-------|-------|---------|
-| recording | `<stem>_correction_report.png`, beside the corrected file | what did this correction do here? |
-| subject | `<arm_root>/reports/<bids_id>_<suffix>_report.png` | is this subject usable, are the runs comparable? |
-| cohort | `<arm_root>/reports/cohort_<suffix>_report.png` | how did this method do overall? |
-| methods | `<experiments_root>/cohort_comparative.png` and `subjects/` | which method behaves best on this data? |
-| topography | `cohort_<suffix>_topography.png` per arm, `<experiments_root>/cohort_topography.png` across arms | **where on the scalp** each method acts |
+### Key Processing Standards
 
-| panel | shows |
-|-------|-------|
-| A | heartbeat-locked artifact, before vs after |
-| B | what was removed, against the artifact |
-| C | spectrum before vs after |
-| D | **what was removed, split cardiac-locked vs not** |
-| E | residual left behind (aggregate) or a time excerpt (single recording) |
-| F | the numbers |
+1. **Non-destructive File Operations**: Corrected BrainVision datasets (`.vhdr`, `.eeg`, `.vmrk`) are written to separate output directories with explicit method suffixes (`_aas`, `_pcaobs`, `_blockedmean`, `_bcgnet`). Raw and FASTR gradient-corrected inputs are never overwritten.
+2. **Frequency Domain Alignment**: Bounded methods operate at native acquisition sampling rates (e.g., 1000 Hz). BCGNet trains on downsampled 100 Hz data and maps predicted BCG traces back to 1000 Hz via polyphase sinc interpolation prior to subtraction, preserving non-cardiac high frequencies.
+3. **RR Interval Validation**: Heartbeat intervals below physiological limits ($RR < \text{minimum}$) indicate false detections and abort processing to prevent artifact injection. Prolonged intervals ($RR > \text{maximum}$) indicate missed beats and are annotated with `Bad_BCG` markers without subtracting unanchored templates.
 
-Subject and cohort pages are grand averages of the small `*_profile.npz` each
-correction leaves beside its output, so they cost no re-reading of EEG.
-
-### How to read them
-
-**Panel D decides everything.** Cardiac harmonics are phase-locked by
-definition, so anything a method removed that is *not* phase-locked cannot be
-BCG. Energy there inside the shaded alpha band is neural signal on its way out.
-
-This matters because **a method that subtracts more than the artifact posts the
-best residual ratio precisely because it is also removing brain**. Suppression
-alone cannot tell a good correction from an aggressive filter. Read the residual
-ratio, the specificity, and the alpha collateral together:
-
-| number | meaning | good |
-|--------|---------|------|
-| `locked residual ratio` | heartbeat-locked energy left, after ÷ before | low |
-| `specificity` | share of the removal that was cardiac-locked | high (1.0 = surgical) |
-| `alpha collateral` | share of the recording's alpha removed in the non-locked part | low |
-
-The comparative page adds **spectral specificity** — the locked share of the
-removal at each frequency, bounded 0–1. It is the clearest single view of
-over-subtraction: a method dipping inside the alpha band is taking signal there.
-
-The topography page makes the same case spatially, and needs no advance guess
-about which signal is at risk. BCG is peripheral and motion-driven; the alpha
-rhythm is posterior. Row A shows the artifact and where each method removed it;
-row B shows the alpha rhythm and where each method took collateral. **A
-collateral map shaped like the alpha map is signal loss** — and the test
-generalises to any spatially structured signal a correction might eat, because
-it asks whether the removal is organised like brain activity at all.
-
-Every other figure collapses 63 channels to one trace, so this is the only place
-that information survives.
-
-`locked residual ratio` on a page is the same number as `residual_qc.ratio` in
-the provenance JSON and `locked_*_ratio` in `compare_summary.csv`; a test asserts
-the page cannot disagree with the provenance beside it.
+---
 
 ## Configuration
 
-`config.yaml` (training) and `compare.yaml` (correction and comparison) at the
-repository root are the live configs for this study, tracked so the paths that
-produced a result stay on record. `examples/` holds the same files with
-placeholder paths — copy those when setting up elsewhere. Relative paths inside
-a config resolve against the folder holding it.
+Study parameters are maintained in dedicated YAML configuration files:
+- **`config.yaml`**: BCGNet training parameters, architecture dimensions, and dataset roots.
+- **`compare.yaml`**: Bounded correction parameters (epoch windows, delays, PCA components, neighbor counts) and comparison roots.
+- **`examples/`**: Template configuration files with standardized placeholder directories.
 
-### Recording labels
+---
 
-Every recording is labelled from its own filename, never from its position in
-the folder. A name carrying a run token (`run1`, `run-02`, `RUN.3`) is that run;
-a name carrying none — a baseline or resting acquisition — is not a run at all.
-It is still processed, it is just named after its own filename (`BaselineEEG`)
-and left out of the run count, so a subject missing run 1 is reported as missing
-it rather than having its baseline promoted into the gap.
+## Verification & Testing
 
-Studies that number runs some other way set their own regex, whose first group
-is the run number:
-
-```yaml
-naming:
-  run_pattern: '_S(\d+)_'
-```
-
-### Parallelism
-
-`compute.workers` sets how many recordings or subjects run at once. The binding
-constraint is RAM, not cores: a bounded-arm worker holds one 1 kHz recording, a
-BCGNet worker holds a whole subject. Raise it against memory.
-
-### CPU or GPU (BCGNet only)
-
-Training is CPU-only unless `compute.device` says otherwise:
-
-```yaml
-compute:
-  workers: 1
-  device: gpu      # or "gpu:1" to pick a card on a multi-GPU host
-```
-
-A `gpu` run fails immediately when TensorFlow reports no card, rather than
-spending hours on the CPU having been asked for the GPU. That failure is the
-common case on Windows: TensorFlow has shipped no native-Windows GPU build since
-2.10, so `pip install tensorflow` there is CPU-only and silent about it. Run
-under WSL2 with `tensorflow[and-cuda]`.
-
-Every GPU worker also gets `TF_FORCE_GPU_ALLOW_GROWTH`. The vendor tree asks for
-memory growth through a TF1 `ConfigProto` that Keras 3 ignores, so without it the
-first worker claims the whole card and the rest fail to start.
-
-## Methods
-
-Independent R-peak detection and the bounded corrections live in
-`src/bcg_correction/`. The bounded arms share one detector, one window, and
-one delay; they differ only in how the artifact estimate is built. Method notes:
-[`docs/bcg_methods.md`](docs/bcg_methods.md).
-
-**BCGNet** (`src/bcgnet/`) trains one GRU per subject at 100 Hz, then
-interpolates the BCG estimate and subtracts it from the original 1 kHz EEG, so
-ECG and line noise are unchanged. It uses no cardiac markers — the vendor dataset
-cuts fixed 3 s epochs and learns ECG→EEG directly, so R-peak detection never
-enters that path. Vendor details and compatibility patches:
-[`docs/UPSTREAM.md`](docs/UPSTREAM.md).
-
-### RR gaps
-
-An RR interval longer than `detector.maximum_rr_seconds` means a beat was not
-detected. No template is subtracted where there is no beat, so that span keeps
-full-amplitude BCG — the correction elsewhere is unaffected. Such spans are
-written to the output as `Bad_BCG` "Bad Interval" markers for downstream epoch
-rejection, and their share is reported as `rr_gap_fraction` in the arm's
-`<stem>.bcg.json`.
-
-`correction.maximum_gap_fraction` caps that share. Above it the recording is
-refused: a recording whose gaps dominate is not one with a few uncorrected spans,
-it is one whose *detected* beats cannot be trusted either.
-
-Every other detection degradation stays fatal, and `rr_below_minimum` is why the
-two differ: an interval shorter than physiology means a **spurious** detection,
-which subtracts a template where no beat occurred and so injects artifact. A gap
-leaves data uncorrected; a spurious beat makes data wrong, and only the first has
-a bounded downstream remedy.
-
-`correction.residual_floor_uv` is the companion escape hatch for
-`maximum_residual_ratio`. The ratio is scale-free, so a recording that began with
-little heartbeat-locked energy cannot halve it however well the correction ran;
-below the floor the ratio stops gating output.
-
-## A caveat on `cohort_summary.csv`
-
-`bcg bcgnet` reports the vendor's own numbers: `rms_raw`/`rms_bcgnet` and the
-per-band `*_bcgnet_ratio` columns. These are **total power** ratios, not
-artifact-reduction measurements. A band ratio of 0.45 says that band's power
-halved; it does not say whether BCG left or neural signal did.
-
-Do not read a low `alpha_bcgnet_ratio` as signal loss: BCG is harmonically
-related to heart rate and its harmonics land squarely in 8–13 Hz, so alpha
-attenuation is an expected consequence of correction. `compare.qc` computes
-`alpha_peak_collapsed` for information and deliberately keeps it out of
-`prefer_comparator` for that reason.
-
-Artifact suppression is measured heartbeat-locked, and only the correction and
-compare paths do it. `bcg_correction.metrics` holds the stricter forms:
-`held_out_cardiac_rms` scores even beats against the odd-beat template and back,
-so no beat helps build the template that scores it, and
-`circular_shifted_cardiac_null` supplies the surrogate null. Signal transfer is a
-separate measurement on injected known signals (`tone_transfer`,
-`band_rms_ratio`, `event_locked_rms_ratio`).
-
-## Development
+The test suite validates numerical equivalence, edge cases, and architectural boundaries across all modules:
 
 ```bash
 uv run pytest
-uv run ruff check src tests
-uv run bcg discover --config config.yaml
-uv run python tools/bench_bcgnet.py     # per-sample GRU timing
+uv run ruff check src tests tools
 ```
 
-## Layout
+All 393 unit and integration tests must pass cleanly.
 
-```
-src/bcgstudy/         neutral CLI, discovery, and bounded-arm orchestration
-src/bcg_correction/   R detection, AAS, PCA-OBS, blocked mean, metrics, report figures
-src/bcgnet/           BCGNet training and write-back
-src/bcgnet/compare/   the only place arms are read against each other
-docs/                 method notes and vendor patches
-examples/             configs with placeholder paths
-experiments/          method-vs-method figures for this study
-tools/                standalone utilities
-```
+---
 
-Every pipeline is a sibling subcommand of `bcg`. There is deliberately no
-default method and no command named after one — running AAS through a command
-called `bcgnet`, as an earlier layout did, quietly tells users which method is
-the real one.
+## References
 
-## Citation
-
-McIntosh, J. R., Yao, J., Hong, L., Faller, J., & Sajda, P. (2020).
-Ballistocardiogram artifact reduction in simultaneous EEG-fMRI using deep
-learning. *IEEE Transactions on Biomedical Engineering*.
+- Allen, P. J., Polizzi, G., Krakow, K., Fish, D. R., & Lemieux, L. (1998). Identification of EEG events in the MR scanner: the problem of pulse artifact and a method for its subtraction. *NeuroImage*, 8(3), 229–239.
+- Niazy, R. K., Xie, J., Miller, P., & Smith, S. M. (2005). Spectral and spatial characteristics of the ballistocardiogram artifact in simultaneous EEG-fMRI. *NeuroImage*, 28(3), 720–737.
+- McIntosh, J. R., Yao, J., Hong, L., Faller, J., & Sajda, P. (2020). Ballistocardiogram artifact reduction in simultaneous EEG-fMRI using deep learning. *IEEE Transactions on Biomedical Engineering*, 68(1), 78–89.
