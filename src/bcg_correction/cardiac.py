@@ -91,147 +91,6 @@ class _SelectionResult:
     rejected_double_mark: int
 
 
-def detect_r_peaks(
-    ecg: npt.ArrayLike,
-    sampling_rate_hz: float,
-    *,
-    config: DetectorConfig,
-) -> CardiacDetection:
-    """Detect ECG R peaks using only the supplied ECG samples.
-
-    The detector follows the MRI-specific FMRIB sequence: QRS-enhancing
-    conditioning, nonnegative k-Teager energy, adaptive thresholding, and a
-    morphology-and-rhythm refinement stage. Returned samples always refer to
-    the original ECG coordinate system.
-    """
-    if not isinstance(config, DetectorConfig):
-        raise CardiacInputError("config must be a DetectorConfig instance")
-    original = _validate_ecg(ecg)
-    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
-    _validate_record_length(original.size, sampling_rate, config)
-
-    centered = original - np.median(original)
-    scale = _robust_scale(centered)
-    standardized = centered / scale
-    conditioned = _bandpass(standardized, sampling_rate, config)
-    energy = _teager_energy(conditioned, sampling_rate, config)
-    candidates, candidate_scores = _generate_candidates(
-        energy,
-        conditioned,
-        sampling_rate,
-        config,
-    )
-    seed = _select_polarity_seed(
-        candidates,
-        candidate_scores,
-        conditioned,
-        sampling_rate=sampling_rate,
-        config=config,
-    )
-    polarity = seed.selected_polarity
-    period = seed.period
-    initial = seed.candidates
-
-    morphology_signal = conditioned
-    template = _build_template(
-        morphology_signal,
-        initial.peaks,
-        sampling_rate,
-        config,
-        polarity=polarity,
-    )
-    selection = _select_events(
-        initial.peaks,
-        morphology_signal,
-        template,
-        period=period,
-        sampling_rate=sampling_rate,
-        config=config,
-        polarity=polarity,
-    )
-    peaks = selection.peaks
-    correlations = selection.correlations
-    rejected_low_correlation = selection.rejected_low_correlation
-    rejected_interval = selection.rejected_interval
-    rejected_double_mark = (
-        initial.rejected_double_mark + selection.rejected_double_mark
-    )
-
-    for _ in range(config.refinement_iterations):
-        peaks = _align_events(
-            peaks,
-            morphology_signal,
-            sampling_rate,
-            config,
-            polarity=polarity,
-        )
-        selection = _select_events(
-            peaks,
-            morphology_signal,
-            template,
-            period=period,
-            sampling_rate=sampling_rate,
-            config=config,
-            polarity=polarity,
-        )
-        peaks = selection.peaks
-        correlations = selection.correlations
-        rejected_low_correlation += selection.rejected_low_correlation
-        rejected_interval += selection.rejected_interval
-        rejected_double_mark += selection.rejected_double_mark
-        template = _build_template(
-            morphology_signal,
-            peaks,
-            sampling_rate,
-            config,
-            polarity=polarity,
-        )
-
-    peaks = _recover_missing_events(
-        peaks,
-        morphology_signal,
-        template,
-        period=period,
-        sampling_rate=sampling_rate,
-        config=config,
-        polarity=polarity,
-    )
-    final_selection = _select_events(
-        peaks,
-        morphology_signal,
-        template,
-        period=period,
-        sampling_rate=sampling_rate,
-        config=config,
-        polarity=polarity,
-        apply_correlation_gate=False,
-    )
-    peaks = final_selection.peaks
-    correlations = final_selection.correlations
-    rejected_low_correlation += final_selection.rejected_low_correlation
-    rejected_interval += final_selection.rejected_interval
-    rejected_double_mark += final_selection.rejected_double_mark
-    if peaks.size < 3:
-        raise CardiacInputError(
-            "ECG detector rejected too many events to form a cardiac train"
-        )
-
-    quality = _quality_summary(
-        candidate_count=int(candidates.size),
-        selected_polarity=polarity,
-        positive_candidate_count=seed.positive_candidate_count,
-        negative_candidate_count=seed.negative_candidate_count,
-        peak_samples=peaks,
-        correlations=correlations,
-        sampling_rate=sampling_rate,
-        rejected_low_prominence=seed.rejected_low_prominence,
-        rejected_low_correlation=rejected_low_correlation,
-        rejected_double_mark=rejected_double_mark,
-        rejected_interval=rejected_interval,
-        config=config,
-    )
-    return CardiacDetection(peak_samples=peaks, quality=quality)
-
 
 def _validate_ecg(ecg: npt.ArrayLike) -> np.ndarray:
     values = np.asarray(ecg)
@@ -986,3 +845,139 @@ def _quality_summary(
         degradation_reasons=degradation_reasons,
         status=status,
     )
+
+
+def detect_r_peaks(
+    ecg: npt.ArrayLike,
+    sampling_rate_hz: float,
+    *,
+    config: DetectorConfig,
+) -> CardiacDetection:
+    """Detect ECG R peaks using only the supplied ECG samples."""
+    if not isinstance(config, DetectorConfig):
+        raise CardiacInputError("config must be a DetectorConfig instance")
+    original = _validate_ecg(ecg)
+    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
+    _validate_record_length(original.size, sampling_rate, config)
+
+    centered = original - np.median(original)
+    scale = _robust_scale(centered)
+    standardized = centered / scale
+    conditioned = _bandpass(standardized, sampling_rate, config)
+    energy = _teager_energy(conditioned, sampling_rate, config)
+    candidates, candidate_scores = _generate_candidates(
+        energy,
+        conditioned,
+        sampling_rate,
+        config,
+    )
+    seed = _select_polarity_seed(
+        candidates,
+        candidate_scores,
+        conditioned,
+        sampling_rate=sampling_rate,
+        config=config,
+    )
+    polarity = seed.selected_polarity
+    period = seed.period
+    initial = seed.candidates
+
+    morphology_signal = conditioned
+    template = _build_template(
+        morphology_signal,
+        initial.peaks,
+        sampling_rate,
+        config,
+        polarity=polarity,
+    )
+    selection = _select_events(
+        initial.peaks,
+        morphology_signal,
+        template,
+        period=period,
+        sampling_rate=sampling_rate,
+        config=config,
+        polarity=polarity,
+    )
+    peaks = selection.peaks
+    correlations = selection.correlations
+    rejected_low_correlation = selection.rejected_low_correlation
+    rejected_interval = selection.rejected_interval
+    rejected_double_mark = (
+        initial.rejected_double_mark + selection.rejected_double_mark
+    )
+
+    for _ in range(config.refinement_iterations):
+        peaks = _align_events(
+            peaks,
+            morphology_signal,
+            sampling_rate,
+            config,
+            polarity=polarity,
+        )
+        selection = _select_events(
+            peaks,
+            morphology_signal,
+            template,
+            period=period,
+            sampling_rate=sampling_rate,
+            config=config,
+            polarity=polarity,
+        )
+        peaks = selection.peaks
+        correlations = selection.correlations
+        rejected_low_correlation += selection.rejected_low_correlation
+        rejected_interval += selection.rejected_interval
+        rejected_double_mark += selection.rejected_double_mark
+        template = _build_template(
+            morphology_signal,
+            peaks,
+            sampling_rate,
+            config,
+            polarity=polarity,
+        )
+
+    peaks = _recover_missing_events(
+        peaks,
+        morphology_signal,
+        template,
+        period=period,
+        sampling_rate=sampling_rate,
+        config=config,
+        polarity=polarity,
+    )
+    final_selection = _select_events(
+        peaks,
+        morphology_signal,
+        template,
+        period=period,
+        sampling_rate=sampling_rate,
+        config=config,
+        polarity=polarity,
+        apply_correlation_gate=False,
+    )
+    peaks = final_selection.peaks
+    correlations = final_selection.correlations
+    rejected_low_correlation += final_selection.rejected_low_correlation
+    rejected_interval += final_selection.rejected_interval
+    rejected_double_mark += final_selection.rejected_double_mark
+    if peaks.size < 3:
+        raise CardiacInputError(
+            "ECG detector rejected too many events to form a cardiac train"
+        )
+
+    quality = _quality_summary(
+        candidate_count=int(candidates.size),
+        selected_polarity=polarity,
+        positive_candidate_count=seed.positive_candidate_count,
+        negative_candidate_count=seed.negative_candidate_count,
+        peak_samples=peaks,
+        correlations=correlations,
+        sampling_rate=sampling_rate,
+        rejected_low_prominence=seed.rejected_low_prominence,
+        rejected_low_correlation=rejected_low_correlation,
+        rejected_double_mark=rejected_double_mark,
+        rejected_interval=rejected_interval,
+        config=config,
+    )
+    return CardiacDetection(peak_samples=peaks, quality=quality)

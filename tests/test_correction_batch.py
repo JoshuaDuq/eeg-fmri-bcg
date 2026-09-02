@@ -8,6 +8,7 @@ recording, every output written, whatever the worker count.
 from pathlib import Path
 
 import numpy as np
+import pytest
 from pybv import write_brainvision
 
 from bcg_correction.bcg_config import DetectorConfig
@@ -16,7 +17,11 @@ from bcg_correction.brainvision import (
     write_brainvision_markers,
 )
 from bcgnet.compare.arms import AAS
-from bcgnet.correction_batch import CorrectionSettings, run_correction_batch
+from bcgstudy.correction_batch import (
+    CorrectionSettings,
+    run_correction_batch,
+    write_aggregate_reports,
+)
 
 _DETECTOR = DetectorConfig(
     ecg_channel="ECG",
@@ -37,7 +42,10 @@ _SETTINGS = CorrectionSettings(
     ecg_to_bcg_delay_seconds=0.21,
     aas_neighbor_count=2,
     pca_obs_components=1,
+    cross_fit_fold_count=2,
     maximum_residual_ratio=0.75,
+    residual_floor_uv=0.0,
+    maximum_gap_fraction=0.05,
     overwrite=False,
     detector=_DETECTOR,
 )
@@ -140,3 +148,12 @@ def test_parallel_batch_matches_serial_batch(tmp_path: Path) -> None:
     assert [row["marker_count"] for row in serial] == [
         row["marker_count"] for row in parallel
     ]
+
+
+def test_aggregate_reports_reject_corrupt_profiles(tmp_path: Path) -> None:
+    subject = tmp_path / "sub-0000"
+    subject.mkdir()
+    np.savez_compressed(subject / "run_profile.npz", method=np.asarray("aas"))
+
+    with pytest.raises(ValueError, match="profile schema"):
+        write_aggregate_reports(tmp_path, AAS)

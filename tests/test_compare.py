@@ -1,8 +1,9 @@
+import csv
 from pathlib import Path
 
 import pytest
 
-from bcgnet.compare.arms import AAS, BCGNET, PCA_OBS
+from bcgnet.compare.arms import AAS, BCGNET, BLOCKED_MEAN, PCA_OBS
 from bcgnet.compare.config import load_compare_config
 from bcgnet.compare.pairs import bcgnet_output_vhdr, pair_recordings
 from bcgnet.config import ConfigurationError
@@ -11,10 +12,48 @@ from bcgnet.export import bcgnet_output_vhdr as export_bcgnet_output_vhdr
 _HEADER = "Brain Vision Data Exchange Header File Version 1.0\n" + ("x" * 120)
 
 _ARM_FILENAME = {
-    "aas": "BaselineEEG_sub0000_fastr_bcg.vhdr",
+    "aas": "BaselineEEG_sub0000_fastr_aas.vhdr",
     "pca_obs": "BaselineEEG_sub0000_fastr_pcaobs.vhdr",
+    "blocked_mean": "BaselineEEG_sub0000_fastr_blockedmean.vhdr",
     "bcgnet": "BaselineEEG_sub0000_fastr_bcgnet.vhdr",
 }
+
+
+def test_empty_summary_replaces_stale_csv_with_current_header(tmp_path: Path) -> None:
+    from bcgnet.compare.pipeline import _write_summary
+    from bcgnet.compare.plots import METRIC_COLUMNS
+
+    output = tmp_path / "out"
+    output.mkdir()
+    csv_path = output / "compare_summary.csv"
+    csv_path.write_text("stale,data\n1,2\n", encoding="utf-8")
+
+    _write_summary(output, [])
+
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        assert list(csv.reader(handle)) == [list(METRIC_COLUMNS)]
+
+
+def test_compare_existing_outputs_never_generates_an_arm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from bcgnet.compare import pipeline
+
+    config_path = _write_compare_yaml(tmp_path, arms=())
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "aas: false", "aas: true"
+        ),
+        encoding="utf-8",
+    )
+    config = load_compare_config(config_path)
+
+    def fail(**kwargs):
+        raise AssertionError("report rebuilding must not run a correction")
+
+    monkeypatch.setattr(pipeline, "run_correction_batch", fail)
+
+    assert pipeline.compare_existing_outputs(config) == []
 
 
 def _write_compare_yaml(
@@ -23,6 +62,7 @@ def _write_compare_yaml(
     arms: tuple[str, ...],
     names: tuple[str, ...] = ("BaselineEEG_sub0000_fastr.vhdr",),
     naming: str = "",
+    compute: str = "compute:\n  workers: 1\n",
     extra: str = "",
 ) -> Path:
     """Lay out a cohort holding only ``arms``, then a config that points at it."""
@@ -40,18 +80,24 @@ paths:
   fastr_root: {tmp_path / "fastr"}
   aas_root: {tmp_path / "aas"}
   pca_obs_root: {tmp_path / "pca_obs"}
+  blocked_mean_root: {tmp_path / "blocked_mean"}
   bcgnet_root: {tmp_path / "bcgnet"}
   output_root: {tmp_path / "out"}
-run:
+  experiments_root: {tmp_path / "experiments"}
+{compute}run:
   aas: false
   pca_obs: false
+  blocked_mean: false
   bcgnet: false
 correction:
   window_seconds: [-0.2, 0.7]
   ecg_to_bcg_delay_seconds: 0.21
   aas_neighbor_count: 20
   pca_obs_components: 4
+  cross_fit_fold_count: 2
   maximum_residual_ratio: 0.5
+  residual_floor_uv: 5.0
+  maximum_gap_fraction: 0.05
   overwrite: false
   detector:
     ecg_channel: ECG
@@ -97,9 +143,7 @@ def test_pair_recordings_finds_every_arm_present_on_disk(tmp_path: Path) -> None
 def test_pair_recordings_omits_an_arm_that_was_never_generated(
     tmp_path: Path,
 ) -> None:
-    config = load_compare_config(
-        _write_compare_yaml(tmp_path, arms=("aas", "bcgnet"))
-    )
+    config = load_compare_config(_write_compare_yaml(tmp_path, arms=("aas", "bcgnet")))
     recording = pair_recordings(config)[0]
     assert set(recording.cleaned_vhdr) == {"aas", "bcgnet"}
 
@@ -114,6 +158,12 @@ def test_pca_obs_is_read_from_its_own_root(tmp_path: Path) -> None:
     assert config.paths.root_for(BCGNET) == (tmp_path / "bcgnet").resolve()
 
 
+def test_blocked_mean_is_read_from_its_own_root(tmp_path: Path) -> None:
+    config = load_compare_config(_write_compare_yaml(tmp_path, arms=()))
+
+    assert config.paths.root_for(BLOCKED_MEAN) == (tmp_path / "blocked_mean").resolve()
+
+
 def test_compare_config_rejects_the_superseded_aas_block(tmp_path: Path) -> None:
     """A config from before PCA-OBS became an arm must fail loudly, not silently."""
     path = _write_compare_yaml(tmp_path, arms=("aas",))
@@ -126,12 +176,7 @@ def test_compare_config_rejects_the_superseded_aas_block(tmp_path: Path) -> None
 
 
 def test_find_bcgnet_vhdr_matches_export_name(tmp_path: Path) -> None:
-    src = (
-        tmp_path
-        / "fastr"
-        / "sub-0001"
-        / "ThermalPainEEGFMRI_run2_sub0001_fastr.vhdr"
-    )
+    src = tmp_path / "fastr" / "sub-0001" / "ThermalPainEEGFMRI_run2_sub0001_fastr.vhdr"
     expected = (
         tmp_path
         / "bcgnet"
@@ -166,9 +211,7 @@ def test_compare_pairs_carry_the_source_path_not_a_recording(
     tmp_path: Path,
 ) -> None:
     """``fastr_vhdr`` is opened directly, so it must be a real path."""
-    config = load_compare_config(
-        _write_compare_yaml(tmp_path, arms=("bcgnet",))
-    )
+    config = load_compare_config(_write_compare_yaml(tmp_path, arms=("bcgnet",)))
     recording = pair_recordings(config)[0]
     assert isinstance(recording.fastr_vhdr, Path)
     assert recording.fastr_vhdr.is_file()
@@ -193,18 +236,252 @@ def test_compare_config_reads_a_worker_count_for_the_bounded_arms(
 ) -> None:
     """``compute.workers`` is how many recordings an arm corrects at once."""
     config = load_compare_config(
-        _write_compare_yaml(
-            tmp_path, arms=(), extra="compute:\n  workers: 4\n"
-        )
+        _write_compare_yaml(tmp_path, arms=(), compute="compute:\n  workers: 4\n")
     )
 
     assert config.compute.workers == 4
 
 
-def test_compare_config_without_a_compute_block_stays_serial(
+def test_compare_config_requires_a_compute_block(
     tmp_path: Path,
 ) -> None:
-    """Configs written before this knob existed must keep correcting serially."""
-    config = load_compare_config(_write_compare_yaml(tmp_path, arms=()))
+    path = _write_compare_yaml(tmp_path, arms=(), compute="")
 
-    assert config.compute.workers == 1
+    with pytest.raises(ConfigurationError, match="compute"):
+        load_compare_config(path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("pca_obs_components: 4", "pca_obs_components: -3", "pca_obs_components"),
+        ("cross_fit_fold_count: 2", "cross_fit_fold_count: 1", "cross_fit_fold_count"),
+        (
+            "maximum_residual_ratio: 0.5",
+            "maximum_residual_ratio: .nan",
+            "maximum_residual_ratio",
+        ),
+        (
+            "correlation_threshold: 0.5",
+            "correlation_threshold: 9.0",
+            "correlation_threshold",
+        ),
+        ("epoch_seconds: 3", "epoch_seconds: -1", "epoch_seconds"),
+    ],
+)
+def test_compare_config_rejects_invalid_numeric_values(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    path = _write_compare_yaml(tmp_path, arms=())
+    path.write_text(path.read_text(encoding="utf-8").replace(old, new))
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_compare_config(path)
+
+
+def test_compare_config_rejects_non_string_subjects(tmp_path: Path) -> None:
+    path = _write_compare_yaml(tmp_path, arms=())
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("include: []", "include: [123]")
+    )
+
+    with pytest.raises(ConfigurationError, match="include"):
+        load_compare_config(path)
+
+
+def _profile(key: str, ratio: float, spec: float, alpha: float):
+    import numpy as np
+
+    from bcg_correction.correction_report import (
+        DISPLAY_MS,
+        FREQUENCY_GRID_HZ,
+        CorrectionProfile,
+    )
+
+    wave = np.zeros_like(DISPLAY_MS)
+    spectrum = np.ones_like(FREQUENCY_GRID_HZ)
+    return CorrectionProfile(
+        method=key,
+        label="run1",
+        template_before=wave,
+        template_after=wave,
+        removed_locked=wave,
+        psd_before=spectrum,
+        psd_after=spectrum,
+        psd_present=spectrum,
+        psd_removed_locked=spectrum,
+        psd_removed_nonlocked=spectrum,
+        excerpt_seconds=np.arange(10.0),
+        excerpt_before=np.zeros(10),
+        excerpt_after=np.zeros(10),
+        channel_names=np.asarray(["Oz", "Pz", "Cz", "Fz"], dtype="<U16"),
+        topo_artifact=np.arange(4.0),
+        topo_alpha_present=np.arange(4.0),
+        topo_removed_locked=np.arange(4.0),
+        topo_collateral_alpha=np.arange(4.0),
+        locked_ratio=ratio,
+        locked_before_uv=10.0,
+        locked_after_uv=10.0 * ratio,
+        specificity=spec,
+        alpha_collateral_fraction=alpha,
+        beats=100,
+        heart_rate_bpm=60.0,
+        applied_delay_seconds=0.21,
+        gap_fraction=0.0,
+    )
+
+
+def test_comparative_report_draws_every_arm(tmp_path) -> None:
+    from bcgnet.compare.comparative import save_comparative_report
+
+    output = tmp_path / "cohort.png"
+    assert save_comparative_report(
+        {
+            "aas": [_profile("aas", 0.32, 0.86, 0.10)],
+            "pca_obs": [_profile("pca_obs", 0.18, 0.68, 0.31)],
+            "bcgnet": [_profile("bcgnet", 0.29, 0.71, 0.17)],
+        },
+        title="three arms",
+        output=output,
+    )
+    assert output.stat().st_size > 10_000
+
+
+def test_comparative_report_handles_a_single_arm(tmp_path) -> None:
+    """Running one method must still produce a page."""
+    from bcgnet.compare.comparative import save_comparative_report
+
+    output = tmp_path / "one.png"
+    assert save_comparative_report(
+        {"aas": [_profile("aas", 0.32, 0.86, 0.10)]},
+        title="one arm",
+        output=output,
+    )
+    assert output.is_file()
+
+
+def test_comparative_report_declines_when_no_arm_ran(tmp_path) -> None:
+    from bcgnet.compare.comparative import save_comparative_report
+
+    assert not save_comparative_report(
+        {"aas": []}, title="none", output=tmp_path / "x.png"
+    )
+
+
+def test_topography_serves_one_method_and_many(tmp_path) -> None:
+    """The same renderer draws a single arm and a comparison."""
+    from bcg_correction.correction_report import save_topography_report
+
+    one = {"AAS": [_profile("aas", 0.32, 0.86, 0.10)]}
+    many = {
+        "AAS": [_profile("aas", 0.32, 0.86, 0.10)],
+        "PCA-OBS": [_profile("pca_obs", 0.20, 0.70, 0.16)],
+    }
+    # Four channels is under the montage minimum, so it declines rather than
+    # drawing a map from too few positions.
+    assert not save_topography_report(one, title="one", output=tmp_path / "a.png")
+    assert not save_topography_report(many, title="many", output=tmp_path / "b.png")
+
+
+def test_topography_declines_profiles_without_channel_maps(tmp_path) -> None:
+    """Profiles written before topography existed must not crash a cohort page."""
+    import numpy as np
+
+    from bcg_correction.correction_report import save_topography_report
+
+    stale = _profile("aas", 0.32, 0.86, 0.10)
+    object.__setattr__(stale, "channel_names", np.asarray([]))
+    assert not save_topography_report(
+        {"AAS": [stale]}, title="stale", output=tmp_path / "c.png"
+    )
+
+
+def _keyed(label: str, ratio: float):
+    """One profile keyed the way ``_write_experiments`` keys them."""
+    profile = _profile("arm", ratio, 0.8, 0.1)
+    object.__setattr__(profile, "label", label)
+    return profile
+
+
+def test_cohort_pairs_arms_onto_their_common_recordings() -> None:
+    """An arm that produced no output on a recording must not be scored only on
+    the ones it survived. AAS is refused by the residual-ratio gate exactly when
+    it did worst, so pairing is what keeps its median honest."""
+    keyed = {
+        "aas": {("s1", "a"): _keyed("a", 0.9), ("s1", "b"): _keyed("b", 0.1)},
+        "pca_obs": {
+            ("s1", "a"): _keyed("a", 0.5),
+            ("s1", "b"): _keyed("b", 0.2),
+            ("s1", "c"): _keyed("c", 0.3),
+        },
+        "bcgnet": {
+            ("s1", "a"): _keyed("a", 0.4),
+            ("s1", "b"): _keyed("b", 0.3),
+            ("s1", "c"): _keyed("c", 0.2),
+        },
+    }
+    attempted = {key: len(items) for key, items in keyed.items()}
+    common = set.intersection(*(set(items) for items in keyed.values()))
+    cohort = {
+        key: [items[recording] for recording in sorted(common)]
+        for key, items in keyed.items()
+    }
+
+    assert common == {("s1", "a"), ("s1", "b")}
+    assert {key: len(value) for key, value in cohort.items()} == {
+        "aas": 2,
+        "pca_obs": 2,
+        "bcgnet": 2,
+    }
+    assert [p.label for p in cohort["pca_obs"]] == [p.label for p in cohort["aas"]]
+    assert {k: attempted[k] - len(common) for k in attempted} == {
+        "aas": 0,
+        "pca_obs": 1,
+        "bcgnet": 1,
+    }
+
+
+def test_comparative_report_reports_each_arm_s_failures(tmp_path) -> None:
+    """``coverage`` carries what each arm attempted, so the page can show that an
+    arm is missing recordings rather than silently omitting them."""
+    from bcgnet.compare.comparative import save_comparative_report
+
+    output = tmp_path / "paired.png"
+    assert save_comparative_report(
+        {
+            "aas": [_profile("aas", 0.32, 0.86, 0.10)],
+            "pca_obs": [_profile("pca_obs", 0.18, 0.68, 0.31)],
+        },
+        title="paired",
+        output=output,
+        coverage={"aas": 6, "pca_obs": 1},
+    )
+    assert output.stat().st_size > 10_000
+
+
+def test_fail_column_counts_failures_not_pairing_drops(tmp_path) -> None:
+    """The arm that fails most defines the paired subset, so counting failures
+    against that subset would report the most fragile arm as failing on nothing.
+    Coverage is the failure count against the recordings offered."""
+    from bcgnet.compare.comparative import save_comparative_report
+
+    offered = 145
+    produced = {"aas": 129, "pca_obs": 132}
+    common = min(produced.values())
+    coverage = {key: offered - n for key, n in produced.items()}
+    assert coverage == {"aas": 16, "pca_obs": 13}
+    # The fragile arm must not read as flawless just because it set the floor.
+    assert coverage["aas"] > coverage["pca_obs"]
+    assert coverage["aas"] != produced["aas"] - common
+
+    output = tmp_path / "coverage.png"
+    assert save_comparative_report(
+        {
+            "aas": [_profile("aas", 0.33, 0.83, 0.09)],
+            "pca_obs": [_profile("pca_obs", 0.27, 0.71, 0.17)],
+        },
+        title="coverage",
+        output=output,
+        coverage=coverage,
+    )
+    assert output.stat().st_size > 10_000

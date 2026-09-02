@@ -6,8 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..correction_batch import correction_output_vhdr
-from ..discovery import iter_subjects
+from bcgstudy.correction_batch import correction_output_vhdr
+from bcgstudy.discovery import iter_subjects
+
 from ..export import bcgnet_output_vhdr
 from .arms import BCGNET, CLEAN_ARMS, Arm
 from .config import CompareConfig
@@ -15,19 +16,9 @@ from .config import CompareConfig
 
 @dataclass(frozen=True, slots=True)
 class RecordingSet:
-    """One FASTR recording and the corrected arms found beside it.
-
-    ``cleaned_vhdr`` holds only arms whose output file actually exists, keyed by
-    ``Arm.key``, so a comparison never has to distinguish "not generated" from
-    "generated but missing".
-    """
-
     bids_id: str
     str_sub: str
-    #: Identifier read from the filename: ``"run2"``, or a name of its own for a
-    #: recording outside the numbered series, such as ``"BaselineEEG"``.
     label: str
-    #: Run number, or ``None`` when the filename carries no run token.
     run: int | None
     stem: str
     fastr_vhdr: Path
@@ -38,7 +29,6 @@ class RecordingSet:
 
 
 def arm_output_vhdr(config: CompareConfig, bids_id: str, src: Path, arm: Arm) -> Path:
-    """Where ``arm``'s corrected copy of ``src`` is expected to live."""
     root = config.paths.root_for(arm)
     if arm is BCGNET:
         return bcgnet_output_vhdr(root, bids_id, src)

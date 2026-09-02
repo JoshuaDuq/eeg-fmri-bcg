@@ -13,7 +13,6 @@ def interpolate_bcg(
     source_times: npt.NDArray[np.floating],
     dest_times: npt.NDArray[np.floating],
 ) -> npt.NDArray[np.float64]:
-    """Interpolate EEG-channel BCG from the training-rate time grid."""
     bcg = np.asarray(bcg_eeg, dtype=np.float64)
     src = np.asarray(source_times, dtype=np.float64)
     dest = np.asarray(dest_times, dtype=np.float64)
@@ -31,7 +30,6 @@ def unstandardized_bcg(
     predicted_bcg_standardized: npt.NDArray[np.floating],
     eeg_std: npt.ArrayLike,
 ) -> npt.NDArray[np.float64]:
-    """Undo per-channel z-scoring of a BCG prediction without restoring means."""
     bcg = np.asarray(predicted_bcg_standardized, dtype=np.float64)
     std = np.asarray(eeg_std, dtype=np.float64)
     if bcg.ndim != 2:
@@ -48,7 +46,6 @@ def subtract_interpolated_bcg(
     *,
     ecg_channel: str = "ECG",
 ) -> mne.io.RawArray:
-    """Subtract interpolated BCG from original-rate EEG; leave ECG untouched."""
     names = list(original.ch_names)
     if ecg_channel not in names:
         raise ValueError(f"ECG channel {ecg_channel!r} is not in {names}")

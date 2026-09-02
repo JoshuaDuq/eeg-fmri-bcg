@@ -1,0 +1,7 @@
+compare_config: ../compare.yaml
+holdout_metrics: ../results/blocked_mean_holdout_20260831/holdout_metrics.csv
+output_root: ../results/blocked_mean_robustness_20260831
+cross_fit_fold_counts: [2, 5, 10, 20]
+injection_amplitude_uv: 5.0
+event_count: 120
+seed: 20260831

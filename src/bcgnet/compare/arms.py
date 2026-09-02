@@ -12,35 +12,26 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Arm:
-    """One correction method as it appears across outputs, metrics, and plots.
-
-    :param key: config flag and CSV column prefix. For the bounded comparator
-        arms this is also the ``method`` string handed to ``bcg_correction``.
-    :param label: legend text and the key used in the in-memory trace mapping.
-    :param suffix: BrainVision stem suffix written by that arm.
-    :param style: matplotlib style string for the PSD overlay.
-    :param color: matplotlib color for the epoch overlay.
-    """
-
     key: str
     label: str
     suffix: str
-    style: str
-    color: str
+
+    @property
+    def command(self) -> str:
+        return self.key.replace("_", "-")
 
 
-# ``suffix`` for AAS stays "bcg" so recordings produced before PCA-OBS became a
-# separate arm remain discoverable without a rename or a re-run.
-AAS = Arm(key="aas", label="AAS", suffix="bcg", style="C2--", color="C2")
-PCA_OBS = Arm(
-    key="pca_obs", label="PCA-OBS", suffix="pcaobs", style="C5--", color="C5"
-)
-BCGNET = Arm(
-    key="bcgnet", label="BCGNet", suffix="bcgnet", style="C3--", color="C3"
-)
+# Every arm is named after its method. AAS wrote "bcg" while it was the only
+# bounded arm; outputs from before this change need renaming to be discovered.
+AAS = Arm(key="aas", label="AAS", suffix="aas")
+PCA_OBS = Arm(key="pca_obs", label="PCA-OBS", suffix="pcaobs")
+BCGNET = Arm(key="bcgnet", label="BCGNet", suffix="bcgnet")
+BLOCKED_MEAN = Arm(key="blocked_mean", label="Blocked mean", suffix="blockedmean")
 
 #: Bounded methods that ``bcg_correction`` can generate from FASTR input.
-COMPARATOR_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS)
+COMPARATOR_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BLOCKED_MEAN)
 
 #: Every corrected arm an overlay may show, in plotting order.
-CLEAN_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BCGNET)
+CLEAN_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BLOCKED_MEAN, BCGNET)
+
+ARM_BY_COMMAND = {arm.command: arm for arm in CLEAN_ARMS}

@@ -92,6 +92,46 @@ _EXPECTED_RUN_ERRORS = (
 )
 
 
+def _recording_id(path: Path) -> str:
+    match = _RUN_KEY_PATTERN.search(path.stem)
+    if match is None:
+        raise BenchmarkInputError(
+            "cannot derive recording key from BrainVision filename: "
+            f"{path.name}"
+        )
+    run = match.group("run").lower()
+    if run == "baseline":
+        run_id = "baseline"
+    else:
+        run_id = f"run{int(match.group('run_number'))}"
+    subject = match.group("subject").lower()
+    return f"{run_id}_sub{subject}"
+
+
+def _index_recordings(root: Path, label: str) -> dict[str, Path]:
+    if not root.is_dir():
+        raise BenchmarkInputError(f"{label} root does not exist: {root}")
+    paths = tuple(
+        sorted(
+            path
+            for path in root.rglob("*.vhdr")
+            if not path.name.startswith("._")
+        )
+    )
+    if not paths:
+        raise BenchmarkInputError(f"{label} root contains no .vhdr files: {root}")
+    indexed: dict[str, Path] = {}
+    for path in paths:
+        recording_id = _recording_id(path)
+        if recording_id in indexed:
+            raise BenchmarkInputError(
+                f"duplicate {label} recording key {recording_id!r}: "
+                f"{indexed[recording_id]} and {path}"
+            )
+        indexed[recording_id] = path.resolve()
+    return indexed
+
+
 def discover_recording_pairs(
     fastr_root: str | Path,
     analyzer_input_root: str | Path,
@@ -150,100 +190,6 @@ def discover_recording_pairs(
         for recording_id in sorted(expected_keys)
     )
 
-
-def run_bcg_benchmark(config: BenchmarkConfig) -> BenchmarkSummary:
-    """Run the locked paired benchmark and write JSON and CSV reports."""
-    pairs = discover_recording_pairs(
-        config.fastr_root,
-        config.analyzer_input_root,
-        config.analyzer_output_root,
-    )
-    config.output_root.mkdir(parents=True, exist_ok=True)
-    report_json = config.output_root / "bcg_benchmark.json"
-    report_csv = config.output_root / "bcg_benchmark.csv"
-    if report_json.exists() or report_csv.exists():
-        raise FileExistsError(
-            f"benchmark report already exists in {config.output_root}"
-        )
-
-    rows: list[dict[str, object]] = []
-    for pair in pairs:
-        try:
-            rows.append(_benchmark_pair(pair, config))
-        except _EXPECTED_RUN_ERRORS as error:
-            rows.append(
-                {
-                    "recording_id": pair.recording_id,
-                    "status": "failed",
-                    "fastr_vhdr": str(pair.fastr_vhdr),
-                    "analyzer_input_vhdr": str(pair.analyzer_input_vhdr),
-                    "analyzer_output_vhdr": str(pair.analyzer_output_vhdr),
-                    "error": f"{type(error).__name__}: {error}",
-                }
-            )
-
-    successful_count = sum(row["status"] == "ok" for row in rows)
-    failed_count = len(rows) - successful_count
-    payload = {
-        "fastr_root": str(config.fastr_root),
-        "analyzer_input_root": str(config.analyzer_input_root),
-        "analyzer_output_root": str(config.analyzer_output_root),
-        "output_root": str(config.output_root),
-        "configuration": asdict(config),
-        "run_count": len(rows),
-        "successful_count": successful_count,
-        "failed_count": failed_count,
-        "runs": rows,
-    }
-    _write_json(report_json, payload)
-    _write_csv(report_csv, rows)
-    return BenchmarkSummary(
-        report_json=report_json,
-        report_csv=report_csv,
-        run_count=len(rows),
-        successful_count=successful_count,
-        failed_count=failed_count,
-    )
-
-
-def _index_recordings(root: Path, label: str) -> dict[str, Path]:
-    if not root.is_dir():
-        raise BenchmarkInputError(f"{label} root does not exist: {root}")
-    paths = tuple(
-        sorted(
-            path
-            for path in root.rglob("*.vhdr")
-            if not path.name.startswith("._")
-        )
-    )
-    if not paths:
-        raise BenchmarkInputError(f"{label} root contains no .vhdr files: {root}")
-    indexed: dict[str, Path] = {}
-    for path in paths:
-        recording_id = _recording_id(path)
-        if recording_id in indexed:
-            raise BenchmarkInputError(
-                f"duplicate {label} recording key {recording_id!r}: "
-                f"{indexed[recording_id]} and {path}"
-            )
-        indexed[recording_id] = path.resolve()
-    return indexed
-
-
-def _recording_id(path: Path) -> str:
-    match = _RUN_KEY_PATTERN.search(path.stem)
-    if match is None:
-        raise BenchmarkInputError(
-            "cannot derive recording key from BrainVision filename: "
-            f"{path.name}"
-        )
-    run = match.group("run").lower()
-    if run == "baseline":
-        run_id = "baseline"
-    else:
-        run_id = f"run{int(match.group('run_number'))}"
-    subject = match.group("subject").lower()
-    return f"{run_id}_sub{subject}"
 
 
 def _benchmark_pair(pair: RecordingPair, config: BenchmarkConfig) -> dict[str, object]:
@@ -364,6 +310,7 @@ def _benchmark_pair(pair: RecordingPair, config: BenchmarkConfig) -> dict[str, o
             ecg_to_bcg_delay_seconds=applied_delay,
             aas_neighbor_count=config.aas_neighbor_count,
             pca_obs_components=config.pca_obs_components,
+            cross_fit_fold_count=config.cross_fit_fold_count,
         )
         result = correct_bcg(
             fastr_data,
@@ -770,3 +717,57 @@ def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
                     ),
                 }
             )
+
+
+def run_bcg_benchmark(config: BenchmarkConfig) -> BenchmarkSummary:
+    pairs = discover_recording_pairs(
+        config.fastr_root,
+        config.analyzer_input_root,
+        config.analyzer_output_root,
+    )
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    report_json = config.output_root / "bcg_benchmark.json"
+    report_csv = config.output_root / "bcg_benchmark.csv"
+    if report_json.exists() or report_csv.exists():
+        raise FileExistsError(
+            f"benchmark report already exists in {config.output_root}"
+        )
+
+    rows: list[dict[str, object]] = []
+    for pair in pairs:
+        try:
+            rows.append(_benchmark_pair(pair, config))
+        except _EXPECTED_RUN_ERRORS as error:
+            rows.append(
+                {
+                    "recording_id": pair.recording_id,
+                    "status": "failed",
+                    "fastr_vhdr": str(pair.fastr_vhdr),
+                    "analyzer_input_vhdr": str(pair.analyzer_input_vhdr),
+                    "analyzer_output_vhdr": str(pair.analyzer_output_vhdr),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+
+    successful_count = sum(row["status"] == "ok" for row in rows)
+    failed_count = len(rows) - successful_count
+    payload = {
+        "fastr_root": str(config.fastr_root),
+        "analyzer_input_root": str(config.analyzer_input_root),
+        "analyzer_output_root": str(config.analyzer_output_root),
+        "output_root": str(config.output_root),
+        "configuration": asdict(config),
+        "run_count": len(rows),
+        "successful_count": successful_count,
+        "failed_count": failed_count,
+        "runs": rows,
+    }
+    _write_json(report_json, payload)
+    _write_csv(report_csv, rows)
+    return BenchmarkSummary(
+        report_json=report_json,
+        report_csv=report_csv,
+        run_count=len(rows),
+        successful_count=successful_count,
+        failed_count=failed_count,
+    )

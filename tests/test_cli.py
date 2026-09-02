@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bcgnet.cli import main
 from bcgnet.config import ConfigurationError, load_config
+from bcgstudy.cli import main
 
 
 def _write_config(tmp_path: Path, **preprocess_overrides) -> Path:
@@ -68,22 +68,33 @@ def test_split_fractions_must_sum_to_one(tmp_path: Path) -> None:
         load_config(path)
 
 
-def _write_compare_config(tmp_path: Path, *, workers: int | None = None) -> Path:
+def _write_compare_config(tmp_path: Path, *, workers: int = 1) -> Path:
     document = {
         "paths": {
             "fastr_root": str(tmp_path / "fastr"),
             "aas_root": str(tmp_path / "aas"),
             "pca_obs_root": str(tmp_path / "pca_obs"),
+            "blocked_mean_root": str(tmp_path / "blocked_mean"),
             "bcgnet_root": str(tmp_path / "bcgnet"),
             "output_root": str(tmp_path / "out"),
+            "experiments_root": str(tmp_path / "experiments"),
         },
-        "run": {"aas": False, "pca_obs": False, "bcgnet": False},
+        "compute": {"workers": workers},
+        "run": {
+            "aas": False,
+            "pca_obs": False,
+            "blocked_mean": False,
+            "bcgnet": False,
+        },
         "correction": {
             "window_seconds": [-0.2, 0.7],
             "ecg_to_bcg_delay_seconds": 0.21,
             "aas_neighbor_count": 20,
             "pca_obs_components": 4,
+            "cross_fit_fold_count": 2,
             "maximum_residual_ratio": 0.5,
+            "residual_floor_uv": 5.0,
+            "maximum_gap_fraction": 0.05,
             "overwrite": False,
             "detector": {
                 "ecg_channel": "ECG",
@@ -107,8 +118,6 @@ def _write_compare_config(tmp_path: Path, *, workers: int | None = None) -> Path
         },
         "subjects": {"include": [], "exclude": []},
     }
-    if workers is not None:
-        document["compute"] = {"workers": workers}
     path = tmp_path / "compare.yaml"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     return path
@@ -121,9 +130,7 @@ def _capture_batch(monkeypatch) -> dict:
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(
-        "bcgnet.correction_batch.run_correction_batch", fake_run
-    )
+    monkeypatch.setattr("bcgstudy.correction_batch.run_correction_batch", fake_run)
     return captured
 
 
@@ -151,6 +158,32 @@ def test_aas_command_still_writes_into_the_aas_root(
     assert captured["output_root"] == (tmp_path / "aas").resolve()
 
 
+def test_blocked_mean_command_writes_into_its_own_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The new arm is a sibling of the other two, not a mode of one of them."""
+    from bcgnet.compare.arms import BLOCKED_MEAN
+
+    captured = _capture_batch(monkeypatch)
+    path = _write_compare_config(tmp_path)
+    assert main(["blocked-mean", "--config", str(path)]) == 0
+    assert captured["arm"] is BLOCKED_MEAN
+    assert captured["output_root"] == (tmp_path / "blocked_mean").resolve()
+
+
+def test_every_comparator_arm_writes_to_a_distinct_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two arms sharing a root would silently overwrite each other's output."""
+    path = _write_compare_config(tmp_path)
+    roots = []
+    for command in ("aas", "pca-obs", "blocked-mean"):
+        captured = _capture_batch(monkeypatch)
+        assert main([command, "--config", str(path)]) == 0
+        roots.append(captured["output_root"])
+    assert len(set(roots)) == len(roots)
+
+
 def test_comparator_commands_correct_recordings_in_parallel(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -163,13 +196,37 @@ def test_comparator_commands_correct_recordings_in_parallel(
     assert captured["workers"] == 4
 
 
-def test_comparator_commands_stay_serial_without_a_compute_block(
+def test_comparator_commands_use_a_declared_serial_worker_count(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """An existing compare config must keep the batch in one process."""
     captured = _capture_batch(monkeypatch)
     path = _write_compare_config(tmp_path)
 
     assert main(["pca-obs", "--config", str(path)]) == 0
 
     assert captured["workers"] == 1
+
+
+def test_reports_rebuilds_bounded_and_comparative_pages(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rebuilt = []
+    compared = []
+
+    def fake_rebuild(**kwargs):
+        rebuilt.append(kwargs["arm"].key)
+        return {"recordings": 2}
+
+    def fake_compare(config):
+        compared.append(config)
+        return []
+
+    monkeypatch.setattr("bcgstudy.correction_batch.rebuild_reports", fake_rebuild)
+    monkeypatch.setattr(
+        "bcgnet.compare.pipeline.compare_existing_outputs", fake_compare
+    )
+
+    path = _write_compare_config(tmp_path)
+    assert main(["reports", "--config", str(path)]) == 0
+    assert rebuilt == ["aas", "pca_obs", "blocked_mean"]
+    assert len(compared) == 1

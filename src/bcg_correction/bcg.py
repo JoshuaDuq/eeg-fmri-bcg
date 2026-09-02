@@ -12,8 +12,17 @@ import mne
 import numpy as np
 import numpy.typing as npt
 
+from bcg_correction.adaptive import (
+    apply_template_predictions_to_recording,
+    contiguous_cross_fit_training_mask,
+    predict_cross_fitted_reference_scaled_mean_templates,
+)
+
 _AAS_NEIGHBOR_POOL_FACTOR = 3
 _AAS_TAPER_FRACTION = 0.05
+
+#: Every bounded method ``correct_bcg`` can apply.
+METHODS = frozenset({"aas", "pca_obs", "blocked_mean"})
 
 
 class BcgInputError(ValueError):
@@ -29,13 +38,17 @@ class BcgCorrectionConfig:
     ecg_to_bcg_delay_seconds: float
     aas_neighbor_count: int
     pca_obs_components: int
+    #: Contiguous held-out blocks used by ``blocked_mean``. Every method
+    #: validates it, because a config that silently carries a nonsense value
+    #: for the arm it is not currently running is a config that will produce a
+    #: nonsense correction the first time the method changes.
+    cross_fit_fold_count: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.method, str) or self.method not in {
-            "aas",
-            "pca_obs",
-        }:
-            raise BcgInputError("method must be 'aas' or 'pca_obs'")
+        if not isinstance(self.method, str) or self.method not in METHODS:
+            raise BcgInputError(
+                "method must be one of " + ", ".join(sorted(METHODS))
+            )
         if (
             not isinstance(self.window_seconds, tuple)
             or len(self.window_seconds) != 2
@@ -74,6 +87,14 @@ class BcgCorrectionConfig:
             raise BcgInputError(
                 "pca_obs_components must be a positive integer"
             )
+        if (
+            isinstance(self.cross_fit_fold_count, bool)
+            or not isinstance(self.cross_fit_fold_count, Integral)
+            or self.cross_fit_fold_count < 2
+        ):
+            raise BcgInputError(
+                "cross_fit_fold_count must be an integer of at least two"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,100 +105,6 @@ class BcgCorrectionResult:
     corrected_samples: npt.NDArray[np.int64]
     method: str
 
-
-def rr_gap_spans(
-    peak_samples: npt.ArrayLike,
-    sampling_rate_hz: float,
-    maximum_rr_seconds: float,
-) -> tuple[tuple[int, int], ...]:
-    """Return full 0-based half-open RR spans that exceed the bound."""
-    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
-    if (
-        isinstance(maximum_rr_seconds, bool)
-        or not isinstance(maximum_rr_seconds, Real)
-        or not math.isfinite(float(maximum_rr_seconds))
-        or float(maximum_rr_seconds) <= 0.0
-    ):
-        raise BcgInputError("maximum_rr_seconds must be finite and positive")
-    peaks = _validate_gap_peak_samples(peak_samples)
-    if peaks.size < 2:
-        return ()
-    max_samples = round(float(maximum_rr_seconds) * sampling_rate)
-    if max_samples < 1:
-        raise BcgInputError("maximum_rr_seconds must cover at least one sample")
-    spans = []
-    for first, second in pairwise(peaks):
-        if int(second) - int(first) > max_samples:
-            spans.append((int(first), int(second)))
-    return tuple(spans)
-
-
-def correct_bcg(
-    data_volts: npt.ArrayLike,
-    peak_samples: npt.ArrayLike,
-    sampling_rate_hz: float,
-    *,
-    channel_names: Sequence[str],
-    eeg_picks: npt.ArrayLike,
-    ecg_channel_index: int,
-    config: BcgCorrectionConfig,
-) -> BcgCorrectionResult:
-    """Apply bounded AAS or MNE PCA-OBS around explicit BCG artifact anchors."""
-    data = _validate_data(data_volts)
-    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
-    peaks = _validate_peak_samples(peak_samples, data.shape[1])
-    names = _validate_channel_names(channel_names, data.shape[0])
-    eeg_indices = _validate_eeg_picks(eeg_picks, data.shape[0])
-    ecg_index = _validate_ecg_index(ecg_channel_index, data.shape[0])
-    if ecg_index in eeg_indices:
-        raise BcgInputError("ecg_channel_index cannot be corrected as EEG")
-
-    window_start, window_stop = _window_samples(
-        config.window_seconds,
-        sampling_rate,
-    )
-    if config.method == "aas" and window_stop - window_start < 2:
-        raise BcgInputError("AAS window must span at least two samples")
-    window_bounds, anchor_samples = _complete_windows(
-        peaks,
-        sampling_rate,
-        config.ecg_to_bcg_delay_seconds,
-        window_start,
-        window_stop,
-        data.shape[1],
-    )
-    if config.method == "aas":
-        corrected_samples = _window_union(
-            window_bounds,
-            sample_count=data.shape[1],
-        )
-        corrected = _correct_aas(
-            data,
-            eeg_indices,
-            window_bounds,
-            anchor_samples,
-            config.aas_neighbor_count,
-        )
-    else:
-        corrected_samples = _window_union(
-            window_bounds,
-            sample_count=data.shape[1],
-        )
-        corrected = _correct_pca_obs(
-            data,
-            names,
-            eeg_indices,
-            anchor_samples,
-            corrected_samples,
-            sampling_rate,
-            config.pca_obs_components,
-        )
-    corrected[ecg_index] = data[ecg_index]
-    return BcgCorrectionResult(
-        data_volts=corrected,
-        corrected_samples=corrected_samples,
-        method=config.method,
-    )
 
 
 def _validate_data(data_volts: npt.ArrayLike) -> np.ndarray:
@@ -346,6 +273,53 @@ def _window_union(
     return np.flatnonzero(coverage).astype(np.int64, copy=False)
 
 
+def _correct_blocked_mean(
+    data: np.ndarray,
+    eeg_indices: np.ndarray,
+    ecg_index: int,
+    window_bounds: tuple[tuple[int, int], ...],
+    fold_count: int,
+) -> np.ndarray:
+    """Subtract a mean template estimated without the target beat's own EEG.
+
+    Beats are split into contiguous folds. For each fold, one scalar per channel
+    regresses the ECG channel out of the beats *outside* the fold, and the mean
+    of what is left is the BCG template. A beat is then corrected by that
+    template plus the same scalars applied to its own ECG epoch, which takes the
+    volume-conducted cardiac field out with the BCG. Neither the regression nor
+    the template can see EEG that the same call will later subtract from, so
+    idiosyncratic activity in one beat cannot cause more to be taken out of that
+    same beat -- the leakage that target-fitted methods are exposed to. The ECG
+    channel is never corrected, so reading the target's ECG is not leakage.
+    """
+    if len(window_bounds) < fold_count:
+        raise BcgInputError(
+            f"blocked_mean needs at least cross_fit_fold_count ({fold_count}) "
+            f"complete windows; {len(window_bounds)} remain"
+        )
+    starts = np.asarray([start for start, _stop in window_bounds], dtype=np.int64)
+    epoch_samples = window_bounds[0][1] - window_bounds[0][0]
+    epoch_indices = starts[:, np.newaxis] + np.arange(epoch_samples)
+    eeg = data[eeg_indices]
+
+    templates = predict_cross_fitted_reference_scaled_mean_templates(
+        eeg[:, epoch_indices].transpose(1, 0, 2),
+        data[ecg_index][epoch_indices],
+        contiguous_cross_fit_training_mask(
+            starts,
+            epoch_samples=epoch_samples,
+            fold_count=fold_count,
+        ),
+    )
+    corrected = data.copy()
+    corrected[eeg_indices] = apply_template_predictions_to_recording(
+        eeg,
+        starts,
+        templates,
+    )
+    return corrected
+
+
 def _correct_aas(
     data: np.ndarray,
     eeg_indices: np.ndarray,
@@ -360,15 +334,13 @@ def _correct_aas(
         )
     eeg = data[eeg_indices]
     sample_count = data.shape[1]
-    correction_sum = np.zeros_like(eeg)
-    correction_count = np.zeros(sample_count, dtype=np.int64)
     pool_size = min(
         max(_AAS_NEIGHBOR_POOL_FACTOR * neighbor_count, neighbor_count),
         len(window_bounds) - 1,
     )
+    estimates = []
     for event_index, (start, stop) in enumerate(window_bounds):
         length = stop - start
-        rel_start = start - int(anchors[event_index])
         epoch = eeg[:, start:stop]
         neighbor_epochs = _aas_neighbor_epochs(
             eeg,
@@ -376,25 +348,20 @@ def _correct_aas(
             window_bounds,
             anchors,
             event_index,
-            rel_start=rel_start,
+            rel_start=start - int(anchors[event_index]),
             length=length,
             neighbor_count=neighbor_count,
             pool_size=pool_size,
             sample_count=sample_count,
         )
-        template = neighbor_epochs.mean(axis=0)
-        fitted = _scale_template(epoch, template)
-        fitted *= _cosine_taper(length)
-        correction_sum[:, start:stop] += fitted
-        correction_count[start:stop] += 1
+        estimates.append(_scale_template(epoch, neighbor_epochs.mean(axis=0)))
 
     corrected = data.copy()
-    corrected_eeg = corrected[eeg_indices]
-    covered = correction_count > 0
-    corrected_eeg[:, covered] -= (
-        correction_sum[:, covered] / correction_count[covered]
+    corrected[eeg_indices] = _subtract_tapered_windows(
+        eeg,
+        window_bounds,
+        estimates,
     )
-    corrected[eeg_indices] = corrected_eeg
     return corrected
 
 
@@ -465,6 +432,34 @@ def _scale_template(epoch: np.ndarray, template: np.ndarray) -> np.ndarray:
     return amplitudes * template_d
 
 
+def _subtract_tapered_windows(
+    eeg: np.ndarray,
+    window_bounds: tuple[tuple[int, int], ...],
+    estimates: Sequence[np.ndarray],
+) -> np.ndarray:
+    """Subtract per-window estimates, tapered to zero at both boundaries.
+
+    The taper is what keeps a corrected recording free of a step wherever a
+    window starts or ends: an estimate that is nonzero at the boundary is a
+    discontinuity, and 93% of a recording sits inside a window, so those steps
+    are frequent. Overlapping windows are averaged rather than applied twice.
+
+    Every bounded method splices through here. An arm that spliced differently
+    would make a comparison between arms partly a comparison of splices.
+    """
+    correction_sum = np.zeros_like(eeg)
+    correction_count = np.zeros(eeg.shape[1], dtype=np.int64)
+    for (start, stop), estimate in zip(window_bounds, estimates, strict=True):
+        correction_sum[:, start:stop] += estimate * _cosine_taper(stop - start)
+        correction_count[start:stop] += 1
+    covered = correction_count > 0
+    corrected = eeg.copy()
+    corrected[:, covered] -= (
+        correction_sum[:, covered] / correction_count[covered]
+    )
+    return corrected
+
+
 def _cosine_taper(sample_count: int) -> np.ndarray:
     taper = np.ones(sample_count, dtype=np.float64)
     edge_samples = max(2, round(_AAS_TAPER_FRACTION * sample_count))
@@ -479,6 +474,7 @@ def _correct_pca_obs(
     data: np.ndarray,
     channel_names: tuple[str, ...],
     eeg_indices: np.ndarray,
+    window_bounds: tuple[tuple[int, int], ...],
     anchor_samples: np.ndarray,
     corrected_samples: np.ndarray,
     sampling_rate: float,
@@ -523,39 +519,46 @@ def _correct_pca_obs(
         raw.close()
         corrected_raw.close()
 
-    corrected = data.copy()
-    corrected[eeg_indices] = _splice_corrected_windows(
+    # ``apply_pca_obs`` demeans each channel over the whole recording, so its
+    # output sits at a different DC than its input. Re-referencing to the
+    # samples no window touches recovers the removal it actually intends;
+    # tapering that removal is what keeps it from stepping at the boundaries.
+    removal = eeg_data - _restore_offset(
         eeg_data,
         corrected_eeg,
         corrected_samples,
     )
+    corrected = data.copy()
+    corrected[eeg_indices] = _subtract_tapered_windows(
+        eeg_data,
+        window_bounds,
+        [removal[:, start:stop] for start, stop in window_bounds],
+    )
     return corrected
 
 
-def _splice_corrected_windows(
+def _restore_offset(
     original: np.ndarray,
     corrected: np.ndarray,
     corrected_samples: np.ndarray,
 ) -> np.ndarray:
-    """Keep the correction inside the artifact windows and restore DC outside.
+    """Put ``corrected`` back on ``original``'s DC, measured where nothing moved.
 
-    ``apply_pca_obs`` demeans each channel over the whole recording and also
-    interpolates between QRS windows. Measuring the offset on the samples that
-    must not move, then copying only the window interiors, is what keeps the
-    splice from leaving a step at every epoch boundary.
+    Samples outside every artifact window are ones the correction must not
+    change, so any difference across them is the whole-recording demean rather
+    than removed artifact. Subtracting it leaves a difference that is only what
+    the method meant to take out.
     """
-    spliced = original.copy()
     if corrected_samples.size == 0:
-        return spliced
+        return corrected
     outside = np.ones(original.shape[1], dtype=bool)
     outside[corrected_samples] = False
-    if np.any(outside):
-        offset = original[:, outside].mean(axis=1, keepdims=True) - corrected[
-            :, outside
-        ].mean(axis=1, keepdims=True)
-        corrected = corrected + offset
-    spliced[:, corrected_samples] = corrected[:, corrected_samples]
-    return spliced
+    if not np.any(outside):
+        return corrected
+    offset = original[:, outside].mean(axis=1, keepdims=True) - corrected[
+        :, outside
+    ].mean(axis=1, keepdims=True)
+    return corrected + offset
 
 
 def _effective_pca_obs_anchors(
@@ -574,3 +577,101 @@ def _effective_pca_obs_anchors(
             "PCA-OBS requires at least two effective heartbeat anchors"
         )
     return anchor_samples[:effective_count]
+
+
+def rr_gap_spans(
+    peak_samples: npt.ArrayLike,
+    sampling_rate_hz: float,
+    maximum_rr_seconds: float,
+) -> tuple[tuple[int, int], ...]:
+    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
+    if (
+        isinstance(maximum_rr_seconds, bool)
+        or not isinstance(maximum_rr_seconds, Real)
+        or not math.isfinite(float(maximum_rr_seconds))
+        or float(maximum_rr_seconds) <= 0.0
+    ):
+        raise BcgInputError("maximum_rr_seconds must be finite and positive")
+    peaks = _validate_gap_peak_samples(peak_samples)
+    if peaks.size < 2:
+        return ()
+    max_samples = round(float(maximum_rr_seconds) * sampling_rate)
+    if max_samples < 1:
+        raise BcgInputError("maximum_rr_seconds must cover at least one sample")
+    spans = []
+    for first, second in pairwise(peaks):
+        if int(second) - int(first) > max_samples:
+            spans.append((int(first), int(second)))
+    return tuple(spans)
+
+
+def correct_bcg(
+    data_volts: npt.ArrayLike,
+    peak_samples: npt.ArrayLike,
+    sampling_rate_hz: float,
+    *,
+    channel_names: Sequence[str],
+    eeg_picks: npt.ArrayLike,
+    ecg_channel_index: int,
+    config: BcgCorrectionConfig,
+) -> BcgCorrectionResult:
+    data = _validate_data(data_volts)
+    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
+    peaks = _validate_peak_samples(peak_samples, data.shape[1])
+    names = _validate_channel_names(channel_names, data.shape[0])
+    eeg_indices = _validate_eeg_picks(eeg_picks, data.shape[0])
+    ecg_index = _validate_ecg_index(ecg_channel_index, data.shape[0])
+    if ecg_index in eeg_indices:
+        raise BcgInputError("ecg_channel_index cannot be corrected as EEG")
+
+    window_start, window_stop = _window_samples(
+        config.window_seconds,
+        sampling_rate,
+    )
+    if config.method == "aas" and window_stop - window_start < 2:
+        raise BcgInputError("AAS window must span at least two samples")
+    window_bounds, anchor_samples = _complete_windows(
+        peaks,
+        sampling_rate,
+        config.ecg_to_bcg_delay_seconds,
+        window_start,
+        window_stop,
+        data.shape[1],
+    )
+    corrected_samples = _window_union(
+        window_bounds,
+        sample_count=data.shape[1],
+    )
+    if config.method == "aas":
+        corrected = _correct_aas(
+            data,
+            eeg_indices,
+            window_bounds,
+            anchor_samples,
+            config.aas_neighbor_count,
+        )
+    elif config.method == "blocked_mean":
+        corrected = _correct_blocked_mean(
+            data,
+            eeg_indices,
+            ecg_index,
+            window_bounds,
+            config.cross_fit_fold_count,
+        )
+    else:
+        corrected = _correct_pca_obs(
+            data,
+            names,
+            eeg_indices,
+            window_bounds,
+            anchor_samples,
+            corrected_samples,
+            sampling_rate,
+            config.pca_obs_components,
+        )
+    corrected[ecg_index] = data[ecg_index]
+    return BcgCorrectionResult(
+        data_volts=corrected,
+        corrected_samples=corrected_samples,
+        method=config.method,
+    )

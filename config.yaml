@@ -1,17 +1,20 @@
 # BCGNet training configuration.
 # This is the live config for this study; examples/config.yaml is the
-# template. Comparison against AAS and PCA-OBS is compare.yaml.
-#   bcgnet discover --config config.yaml
-#   bcgnet run --config config.yaml
+# template. Comparison against the bounded arms is compare.yaml.
+#   bcg discover --config config.yaml
+#   bcg bcgnet --config config.yaml
 
 paths:
   # Gradient-corrected EEG (BCG still present).
-  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python
-  output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
+  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2
+  output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcgnet
 
 compute:
-  # Two subject workers share this machine's 10 cores.
-  workers: 2
+  # Five subject workers over this machine's 10 cores, two threads each.
+  # Worker count is bounded by RAM, not cores: a worker holds one subject's
+  # recordings at 1 kHz (~2.3 GB) plus the cleaned copy, so five is what
+  # 24 GB holds. threads_per_worker: auto then spends the remaining cores.
+  workers: 5
   cpu_count: 10
   # "auto" sets threads_per_worker = cpu_count // workers
   threads_per_worker: auto
@@ -23,10 +26,10 @@ compute:
   device: cpu
 
 training:
-  # Cap is the paper YAML (2500). Early stopping decides. Keep batch 16.
+  # Cap is the paper YAML (2500). Early stopping decides.
   num_epochs: 2500
   es_patience: 25
-  batch_size: 16
+  batch_size: 1
   learning_rate: 0.001
   random_seed: 1997
   architecture: default_rnn_model

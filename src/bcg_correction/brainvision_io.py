@@ -46,8 +46,53 @@ class BrainVisionRecording:
     markers: tuple[BrainVisionMarker, ...]
 
 
+def _read_header_references(path: Path) -> tuple[str, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] not in _HEADER_IDENTIFIERS:
+        raise BrainVisionInputError("invalid BrainVision header identifier")
+
+    in_common_infos = False
+    references: dict[str, str] = {}
+    for line in lines[1:]:
+        if not line or line.startswith(";"):
+            continue
+        if line.startswith("["):
+            if line == "[Common Infos]":
+                in_common_infos = True
+                continue
+            if in_common_infos:
+                break
+        if not in_common_infos:
+            continue
+        key, separator, value = line.partition("=")
+        if separator and key in ("DataFile", "MarkerFile"):
+            if key in references:
+                raise BrainVisionInputError(f"duplicate BrainVision {key} declaration")
+            references[key] = value
+
+    missing = [key for key in ("DataFile", "MarkerFile") if key not in references]
+    if missing:
+        raise BrainVisionInputError(
+            f"BrainVision header is missing {', '.join(missing)}"
+        )
+    return references["DataFile"], references["MarkerFile"]
+
+
+def _resolve_local_reference(
+    header_path: Path,
+    reference: str,
+    field_name: str,
+) -> Path:
+    if not reference or reference in (".", "..") or any(
+        separator in reference for separator in ("/", "\\")
+    ):
+        raise BrainVisionInputError(
+            f"BrainVision {field_name} must be a same-directory filename"
+        )
+    return header_path.parent / reference
+
+
 def read_brainvision_recording(path: str | Path) -> BrainVisionRecording:
-    """Resolve a BrainVision header and read its marker file strictly."""
     header_path = Path(path).expanduser().resolve()
     if header_path.suffix.lower() != ".vhdr":
         raise BrainVisionInputError("the BrainVision input must have a .vhdr suffix")
@@ -160,6 +205,32 @@ def resample_markers(
     return tuple(transformed)
 
 
+def _validate_output_data(
+    data: np.ndarray,
+    sampling_rate: float,
+    channel_names: Sequence[str],
+) -> None:
+    if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] == 0:
+        raise BrainVisionInputError("data must have shape (channels, samples)")
+    if not np.issubdtype(data.dtype, np.number) or not np.all(np.isfinite(data)):
+        raise BrainVisionInputError("data must contain finite numeric values")
+    if (
+        isinstance(sampling_rate, bool)
+        or not isinstance(sampling_rate, (int, float))
+        or not math.isfinite(float(sampling_rate))
+        or sampling_rate <= 0.0
+    ):
+        raise BrainVisionInputError("sampling_rate must be finite and positive")
+    if len(channel_names) != data.shape[0] or not all(
+        isinstance(name, str) and name for name in channel_names
+    ):
+        raise BrainVisionInputError(
+            "channel_names must contain one nonempty string per channel"
+        )
+    if len(set(channel_names)) != len(channel_names):
+        raise BrainVisionInputError("channel_names must be unique")
+
+
 def write_brainvision_recording(
     *,
     data: npt.NDArray[np.floating],
@@ -168,12 +239,6 @@ def write_brainvision_recording(
     output_vhdr: str | Path,
     markers: Iterable[BrainVisionMarker],
 ) -> None:
-    """Write a complete BrainVision recording without overwriting output files.
-
-    ``data`` is expected in SI volts, matching MNE's raw-data convention. The
-    binary output is written as float32 with BrainVision's conventional microvolt
-    unit declaration.
-    """
     recording = np.asarray(data)
     _validate_output_data(recording, sampling_rate, channel_names)
     marker_values = tuple(markers)
@@ -222,75 +287,3 @@ def write_brainvision_recording(
         for suffix in (".eeg", ".vmrk", ".vhdr"):
             temporary_path = temporary_directory_path / f"{header_path.stem}{suffix}"
             temporary_path.rename(header_path.with_suffix(suffix))
-
-
-def _read_header_references(path: Path) -> tuple[str, str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0] not in _HEADER_IDENTIFIERS:
-        raise BrainVisionInputError("invalid BrainVision header identifier")
-
-    in_common_infos = False
-    references: dict[str, str] = {}
-    for line in lines[1:]:
-        if not line or line.startswith(";"):
-            continue
-        if line.startswith("["):
-            if line == "[Common Infos]":
-                in_common_infos = True
-                continue
-            if in_common_infos:
-                break
-        if not in_common_infos:
-            continue
-        key, separator, value = line.partition("=")
-        if separator and key in ("DataFile", "MarkerFile"):
-            if key in references:
-                raise BrainVisionInputError(f"duplicate BrainVision {key} declaration")
-            references[key] = value
-
-    missing = [key for key in ("DataFile", "MarkerFile") if key not in references]
-    if missing:
-        raise BrainVisionInputError(
-            f"BrainVision header is missing {', '.join(missing)}"
-        )
-    return references["DataFile"], references["MarkerFile"]
-
-
-def _resolve_local_reference(
-    header_path: Path,
-    reference: str,
-    field_name: str,
-) -> Path:
-    if not reference or reference in (".", "..") or any(
-        separator in reference for separator in ("/", "\\")
-    ):
-        raise BrainVisionInputError(
-            f"BrainVision {field_name} must be a same-directory filename"
-        )
-    return header_path.parent / reference
-
-
-def _validate_output_data(
-    data: np.ndarray,
-    sampling_rate: float,
-    channel_names: Sequence[str],
-) -> None:
-    if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] == 0:
-        raise BrainVisionInputError("data must have shape (channels, samples)")
-    if not np.issubdtype(data.dtype, np.number) or not np.all(np.isfinite(data)):
-        raise BrainVisionInputError("data must contain finite numeric values")
-    if (
-        isinstance(sampling_rate, bool)
-        or not isinstance(sampling_rate, (int, float))
-        or not math.isfinite(float(sampling_rate))
-        or sampling_rate <= 0.0
-    ):
-        raise BrainVisionInputError("sampling_rate must be finite and positive")
-    if len(channel_names) != data.shape[0] or not all(
-        isinstance(name, str) and name for name in channel_names
-    ):
-        raise BrainVisionInputError(
-            "channel_names must contain one nonempty string per channel"
-        )
-    if len(set(channel_names)) != len(channel_names):
-        raise BrainVisionInputError("channel_names must be unique")

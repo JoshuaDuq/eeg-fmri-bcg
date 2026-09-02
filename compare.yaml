@@ -1,30 +1,39 @@
-# Study comparison configuration: FASTR vs AAS vs PCA-OBS vs BCGNet.
+# Study comparison configuration: FASTR vs AAS vs PCA-OBS vs blocked mean
+# vs BCGNet.
 # This is the live config for this study; examples/compare.yaml is the template.
-#   bcgnet aas      --config compare.yaml
-#   bcgnet pca-obs  --config compare.yaml
-#   bcgnet compare  --config compare.yaml
+#   bcg aas           --config compare.yaml
+#   bcg pca-obs       --config compare.yaml
+#   bcg blocked-mean  --config compare.yaml
+#   bcg compare       --config compare.yaml
 #
-# Keep the run flags false unless you want `bcgnet compare` to generate an arm
+# Keep the run flags false unless you want `bcg compare` to generate an arm
 # first (same code paths as the standalone commands above).
 
 paths:
-  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python
-  # AAS keeps the historical *_fastr_bcg.vhdr name in this folder.
-  aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcg_gapfix
+  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2
+  # AAS writes *_fastr_aas.vhdr here.
+  aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcg
   # PCA-OBS writes *_fastr_pcaobs.vhdr, so the two arms never overwrite.
-  pca_obs_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_pcaobs
-  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_bcgnet
+  pca_obs_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_pcaobs
+  # Blocked mean writes *_fastr_blockedmean.vhdr.
+  blocked_mean_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_blockedmean
+  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcgnet
   output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v2
+  # Generated method-vs-method pages belong under the ignored results tree;
+  # experiment definitions remain separately reviewable under experiments/.
+  experiments_root: results/comparison_figures
 
 # Recordings are corrected independently, so this is simply how many run at
-# once. Four matches this machine's performance cores; each worker holds one
-# 1 kHz recording in memory, so raise it against RAM, not core count.
+# once. Ten matches this machine's core count: unlike BCGNet training, a
+# bounded arm holds only one 1 kHz recording plus its beat stack (~1.5 GB), so
+# ten fit in 24 GB. Raise it against RAM, not core count.
 compute:
-  workers: 4
+  workers: 10
 
 run:
   aas: false
   pca_obs: false
+  blocked_mean: false
   bcgnet: false
 
 # Used only when run.bcgnet is true. A relative path resolves against the
@@ -32,13 +41,42 @@ run:
 bcgnet_config: config.yaml
 
 # Shared by the aas and pca_obs arms: one detector, one window, one delay, so
-# the two bounded methods differ only in how they build the artifact estimate.
+# the bounded methods differ only in how they build the artifact estimate.
 correction:
   window_seconds: [-0.2, 0.7]
   ecg_to_bcg_delay_seconds: 0.210
   aas_neighbor_count: 20
-  pca_obs_components: 4
+  # Two, not the MNE default of four. Swept on this cohort (n=42): components
+  # 3 and 4 removed no additional artifact -- 1-4 Hz phase-locked removal was
+  # flat at 18.3 / 18.5 / 18.3 for 2 / 3 / 4 -- while alpha taken as collateral
+  # climbed 18.7% -> 26.6% -> 33.1%. Every component past the second was pure
+  # signal loss, and n=2 beat n=3 on alpha in 42 of 42 recordings.
+  pca_obs_components: 2
+  # Contiguous held-out blocks for the blocked-mean arm. Each beat is corrected
+  # by the mean of the beats outside its own block (ECG regressed out of those
+  # training beats, then the same ECG scale applied to the beat's own ECG), so
+  # nothing the method subtracts from a beat's EEG was estimated from that
+  # beat. Swept over 2/5/10/20 on 28 recordings: suppression is flat from five
+  # folds upward (0.247 / 0.247 / 0.246 for 5 / 10 / 20), so ten sits on a
+  # plateau rather than at a tuned optimum. Re-confirmed after the 2026-09-01
+  # ECG-projection fix.
+  cross_fit_fold_count: 10
+  # Calibrated at 1000 Hz. The ratio rises with sampling rate -- the same
+  # recordings gave a median 0.156 at 250 Hz and 0.189 at 1000 Hz -- so a
+  # cohort resampled to another rate is gated more or less strictly than
+  # this number implies. Recalibrate rather than reuse it.
   maximum_residual_ratio: 0.5
+  # The ratio above is scale-free, so a recording that began with little
+  # heartbeat-locked energy cannot halve it however well the correction ran.
+  # Below this absolute locked residual the ratio stops gating output. 5 uV is
+  # under the p10 of *raw* locked amplitude across recordings that pass.
+  residual_floor_uv: 5.0
+  # No template is subtracted where no beat was detected, so an RR gap leaves
+  # full-amplitude BCG in a bounded span. Those spans are written to the output
+  # as "Bad Interval" markers for downstream rejection; above this share of the
+  # recording the detected beats cannot be trusted either, so the recording is
+  # refused. 0.05 sits at the cohort's p95 gap burden.
+  maximum_gap_fraction: 0.05
   overwrite: false
   detector:
     ecg_channel: ECG

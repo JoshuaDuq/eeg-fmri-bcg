@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -12,9 +13,46 @@ from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+from bcgstudy.discovery import iter_subjects
+
 from .config import BCGNetConfig, ComputeConfig, ConfigurationError
-from .discovery import iter_subjects
 from .runtime import VENDOR_ROOT, prepare_vendor_imports
+
+_COHORT_SUMMARY_FIELDS = (
+    "bids_id",
+    "status",
+    "n_runs",
+    "label",
+    "run",
+    "stem",
+    "n_good",
+    "end_epoch",
+    "runtime_seconds",
+    "rms_raw",
+    "rms_bcgnet",
+    "delta_bcgnet_ratio",
+    "theta_bcgnet_ratio",
+    "alpha_bcgnet_ratio",
+)
+STAGED_NAMING_FORMAT = "{}_{}_raw"
+
+
+class _Tee:
+    def __init__(self, path: Path):
+        self.file = path.open("w", encoding="utf-8")
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+        self.file.flush()
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 
 def discover_subjects(config: BCGNetConfig) -> list[dict]:
@@ -48,12 +86,6 @@ def discover_subjects(config: BCGNetConfig) -> list[dict]:
 
 
 def run_count(spec: dict) -> int:
-    """How many of a subject's recordings belong to the numbered run series.
-
-    Recordings without a run number -- a baseline or resting acquisition -- are
-    still trained on and still cleaned; they are simply not runs, so counting
-    them here would report a run the study never acquired.
-    """
     return sum(1 for item in spec["recordings"] if item["run"] is not None)
 
 
@@ -71,12 +103,6 @@ def _rewrite_vhdr(src_vhdr: Path, dst_vhdr: Path) -> None:
         if dst.exists() or dst.is_symlink():
             dst.unlink()
         os.symlink(src, dst)
-
-
-#: Staged filenames carry the recording label, so ``vec_idx_run`` can hand the
-#: vendor Session a label instead of a position. It only ever formats the value
-#: into a path and prints it, never does arithmetic on it.
-STAGED_NAMING_FORMAT = "{}_{}_raw"
 
 
 def staged_vhdr(output_root: Path, str_sub: str, label: str) -> Path:
@@ -125,16 +151,6 @@ def _band_metrics(dataset, vendor_cfg, mode: str = "test") -> list[dict]:
 
 
 def worker_environment(config: BCGNetConfig) -> dict[str, str]:
-    """The environment one training worker needs, from ``compute``.
-
-    ``process_subject`` applies this before importing TensorFlow, which reads
-    all of it once at import and never again.
-
-    A GPU run also asks for memory growth. The vendor tree requests it through
-    a TF1 ``ConfigProto`` that Keras 3 ignores, so this variable is what
-    actually takes effect -- without it the first worker claims the whole card
-    and every other worker fails to start.
-    """
     threads = str(config.compute.threads_per_worker)
     environment = {
         "CUDA_VISIBLE_DEVICES": config.compute.cuda_visible_devices,
@@ -149,17 +165,6 @@ def worker_environment(config: BCGNetConfig) -> dict[str, str]:
 
 
 def require_device(compute: ComputeConfig, visible_gpus: Sequence[object]) -> None:
-    """Fail a GPU run that TensorFlow cannot actually put on a GPU.
-
-    The trap this closes is silent: TensorFlow has shipped no native-Windows
-    GPU build since 2.10, so ``pip install tensorflow`` there trains on CPU
-    without complaining. A cohort would finish many hours later having never
-    touched the card.
-
-    This is checked inside the worker rather than once up front on purpose.
-    Listing devices initialises the CUDA driver, and on Linux -- where
-    ``ProcessPoolExecutor`` forks -- a CUDA context does not survive the fork.
-    """
     if compute.use_gpu and not visible_gpus:
         raise ConfigurationError(
             f"compute.device is {compute.device!r} but TensorFlow reports no GPU. "
@@ -167,6 +172,121 @@ def require_device(compute: ComputeConfig, visible_gpus: Sequence[object]) -> No
             "Windows run under WSL2 with tensorflow[and-cuda]. Set "
             "compute.device: cpu to train on the CPU instead."
         )
+    if compute.use_gpu and not visible_gpus:
+        raise ConfigurationError(
+            f"compute.device is {compute.device!r} but TensorFlow reports no GPU. "
+            "TensorFlow has had no native-Windows GPU build since 2.10; on "
+            "Windows run under WSL2 with tensorflow[and-cuda]. Set "
+            "compute.device: cpu to train on the CPU instead."
+        )
+
+
+def _initial_result(spec: dict) -> dict:
+    return {
+        "bids_id": spec["bids_id"],
+        "str_sub": spec["str_sub"],
+        "status": "error",
+        "n_runs": run_count(spec),
+        "n_recordings": len(spec["recordings"]),
+        "recordings": [
+            {
+                "label": recording["label"],
+                "run": recording["run"],
+                "stem": recording["stem"],
+            }
+            for recording in spec["recordings"]
+        ],
+    }
+
+
+def _completed_result(path: Path, *, resume: bool) -> dict | None:
+    if not resume or not path.exists():
+        return None
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    if previous.get("status") != "ok":
+        return None
+    previous["skipped"] = True
+    return previous
+
+
+def _configure_vendor(get_config, config: BCGNetConfig, str_sub: str):
+    output_root = config.paths.output_root
+    vendor_config = get_config(filename=VENDOR_ROOT / "config" / "default_config.yaml")
+    vendor_config.d_root = VENDOR_ROOT
+    vendor_config.d_data = output_root / "staged" / "raw_data"
+    vendor_config.d_model = output_root / "trained_model" / str_sub
+    vendor_config.d_output = output_root / "cleaned_data"
+    vendor_config.d_eval = None
+    vendor_config.str_eval = None
+    vendor_config.num_epochs = config.training.num_epochs
+    vendor_config.es_patience = config.training.es_patience
+    vendor_config.batch_size = config.training.batch_size
+    vendor_config.lr = config.training.learning_rate
+    vendor_config.new_fs = config.preprocess.new_fs
+    vendor_config.len_epoch = round(config.preprocess.len_epoch)
+    vendor_config.mad_threshold = config.preprocess.mad_threshold
+    vendor_config.per_training = config.preprocess.per_training
+    vendor_config.per_valid = config.preprocess.per_valid
+    vendor_config.per_test = config.preprocess.per_test
+    vendor_config.str_ecg_channel = config.preprocess.ecg_channel
+    vendor_config.input_file_naming_format = STAGED_NAMING_FORMAT
+    return vendor_config
+
+
+def _collect_metrics(session, recordings: list[dict], vendor_config) -> list[dict]:
+    metrics = []
+    for dataset, recording in zip(session.vec_dataset, recordings, strict=True):
+        rms = dataset.rms_results.get("test")
+        row = {
+            "label": recording["label"],
+            "run": recording["run"],
+            "stem": recording["stem"],
+            "n_good": len(dataset.vec_idx_good_epochs),
+        }
+        if rms is not None:
+            row["rms_raw"] = float(rms[0])
+            row["rms_bcgnet"] = float(rms[2])
+        try:
+            row["bands"] = _band_metrics(dataset, vendor_config, mode="test")
+        except Exception as error:
+            row["bands_error"] = f"{type(error).__name__}: {error}"
+        metrics.append(row)
+    return metrics
+
+
+def _write_cleaned_recordings(session, spec: dict, config: BCGNetConfig) -> None:
+    from .export import bcgnet_output_vhdr, write_bcgnet_recording
+
+    for dataset, recording in zip(session.vec_dataset, spec["recordings"], strict=True):
+        cleaned = (
+            dataset.orig_cleaned_dataset
+            if dataset.resampled
+            else dataset.cleaned_dataset
+        )
+        source = Path(recording["fastr_vhdr"])
+        write_bcgnet_recording(
+            cleaned,
+            source,
+            bcgnet_output_vhdr(config.paths.output_root, spec["bids_id"], source),
+            overwrite=config.training.overwrite,
+        )
+
+
+def _success_result(session, metrics: list[dict], runtime_seconds: float) -> dict:
+    return {
+        "status": "ok",
+        "end_epoch": (
+            int(session.end_epoch) if session.end_epoch is not None else None
+        ),
+        "loss_last": (
+            float(session.m.history["loss"][-1]) if session.m is not None else None
+        ),
+        "val_loss_last": (
+            float(session.m.history["val_loss"][-1]) if session.m is not None else None
+        ),
+        "metrics": metrics,
+        "runtime_seconds": runtime_seconds,
+    }
 
 
 def process_subject(spec: dict, config: BCGNetConfig) -> dict:
@@ -185,21 +305,7 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
     bids_id = spec["bids_id"]
     str_sub = spec["str_sub"]
     t0 = time.time()
-    result = {
-        "bids_id": bids_id,
-        "str_sub": str_sub,
-        "status": "error",
-        "n_runs": run_count(spec),
-        "n_recordings": len(spec["recordings"]),
-        "recordings": [
-            {
-                "label": recording["label"],
-                "run": recording["run"],
-                "stem": recording["stem"],
-            }
-            for recording in spec["recordings"]
-        ],
-    }
+    result = _initial_result(spec)
     output_root = config.paths.output_root
     results_dir = output_root / "results"
     log_dir = output_root / "logs"
@@ -208,56 +314,16 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
     out_json = results_dir / f"{bids_id}.json"
     log_path = log_dir / f"{bids_id}.log"
 
-    if config.training.resume and out_json.exists():
-        try:
-            previous = json.loads(out_json.read_text(encoding="utf-8"))
-            if previous.get("status") == "ok":
-                previous["skipped"] = True
-                return previous
-        except Exception:
-            pass
-
-    class _Tee:
-        def __init__(self, path: Path):
-            self.file = path.open("w", encoding="utf-8")
-            self.stdout = sys.stdout
-
-        def write(self, data):
-            self.stdout.write(data)
-            self.file.write(data)
-            self.file.flush()
-
-        def flush(self):
-            self.stdout.flush()
-            self.file.flush()
-
-        def close(self):
-            self.file.close()
+    previous = _completed_result(out_json, resume=config.training.resume)
+    if previous is not None:
+        return previous
 
     tee = _Tee(log_path)
     old_stdout = sys.stdout
     sys.stdout = tee
     try:
         stage_subject(spec, output_root)
-        vendor_cfg = get_config(filename=VENDOR_ROOT / "config" / "default_config.yaml")
-        vendor_cfg.d_root = VENDOR_ROOT
-        vendor_cfg.d_data = output_root / "staged" / "raw_data"
-        vendor_cfg.d_model = output_root / "trained_model" / str_sub
-        vendor_cfg.d_output = output_root / "cleaned_data"
-        vendor_cfg.d_eval = None
-        vendor_cfg.str_eval = None
-        vendor_cfg.num_epochs = config.training.num_epochs
-        vendor_cfg.es_patience = config.training.es_patience
-        vendor_cfg.batch_size = config.training.batch_size
-        vendor_cfg.lr = config.training.learning_rate
-        vendor_cfg.new_fs = config.preprocess.new_fs
-        vendor_cfg.len_epoch = round(config.preprocess.len_epoch)
-        vendor_cfg.mad_threshold = config.preprocess.mad_threshold
-        vendor_cfg.per_training = config.preprocess.per_training
-        vendor_cfg.per_valid = config.preprocess.per_valid
-        vendor_cfg.per_test = config.preprocess.per_test
-        vendor_cfg.str_ecg_channel = config.preprocess.ecg_channel
-        vendor_cfg.input_file_naming_format = STAGED_NAMING_FORMAT
+        vendor_cfg = _configure_vendor(get_config, config, str_sub)
 
         import tensorflow as tf
 
@@ -271,9 +337,7 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         except RuntimeError:
             pass
 
-        vec_idx_run = [
-            recording["label"] for recording in spec["recordings"]
-        ]
+        vec_idx_run = [recording["label"] for recording in spec["recordings"]]
         print(
             f"=== {bids_id} recordings={vec_idx_run} "
             f"runs={run_count(spec)} tf={tf.__version__} "
@@ -297,79 +361,18 @@ def process_subject(spec: dict, config: BCGNetConfig) -> dict:
         session.clean()
         session.evaluate(mode="test")
 
-        metrics = []
-        for dataset, recording in zip(
-            session.vec_dataset, spec["recordings"], strict=True
-        ):
-            rms = dataset.rms_results.get("test")
-            row = {
-                "label": recording["label"],
-                "run": recording["run"],
-                "stem": recording["stem"],
-                "n_good": len(dataset.vec_idx_good_epochs),
-            }
-            if rms is not None:
-                row["rms_raw"] = float(rms[0])
-                row["rms_bcgnet"] = float(rms[2])
-            try:
-                row["bands"] = _band_metrics(dataset, vendor_cfg, mode="test")
-            except Exception as exc:
-                row["bands_error"] = f"{type(exc).__name__}: {exc}"
-            metrics.append(row)
+        metrics = _collect_metrics(session, spec["recordings"], vendor_cfg)
 
         if config.training.save_model:
             session.save_model()
-        if config.training.save_data or config.training.save_figures:
-            from .compare.plots import load_fastr
-            from .export import bcgnet_output_vhdr, write_bcgnet_recording
-            from .figures import plot_before_after_psd
-
-            fig_dir = output_root / "figures" / str_sub
-            for dataset, recording in zip(
-                session.vec_dataset, spec["recordings"], strict=True
-            ):
-                cleaned = (
-                    dataset.orig_cleaned_dataset
-                    if dataset.resampled
-                    else dataset.cleaned_dataset
-                )
-                source = Path(recording["fastr_vhdr"])
-                label = recording["label"]
-                if config.training.save_data:
-                    write_bcgnet_recording(
-                        cleaned,
-                        source,
-                        bcgnet_output_vhdr(output_root, bids_id, source),
-                        overwrite=config.training.overwrite,
-                    )
-                if config.training.save_figures:
-                    plot_before_after_psd(
-                        load_fastr(source),
-                        cleaned,
-                        title=f"{bids_id} {label} before vs after",
-                        output=fig_dir / f"psd_{label}_avg.png",
-                    )
+        if config.training.save_data:
+            _write_cleaned_recordings(session, spec, config)
         if config.training.save_figures:
             fig_dir = output_root / "figures" / str_sub
             fig_dir.mkdir(parents=True, exist_ok=True)
             session.plot_training_history(p_figure=fig_dir)
 
-        result.update(
-            {
-                "status": "ok",
-                "end_epoch": (
-                    int(session.end_epoch) if session.end_epoch is not None else None
-                ),
-                "loss_last": float(session.m.history["loss"][-1])
-                if session.m is not None
-                else None,
-                "val_loss_last": float(session.m.history["val_loss"][-1])
-                if session.m is not None
-                else None,
-                "metrics": metrics,
-                "runtime_seconds": time.time() - t0,
-            }
-        )
+        result.update(_success_result(session, metrics, time.time() - t0))
         print(f"=== {bids_id} DONE in {result['runtime_seconds']:.1f}s")
     except Exception:
         result["traceback"] = traceback.format_exc()
@@ -427,18 +430,10 @@ def write_cohort_summary(results: list[dict], output_root: Path) -> Path:
     summary_json.write_text(
         json.dumps({"n_subjects": len(results), "results": results}, indent=2)
     )
-    if rows:
-        keys = list(rows[0].keys())
-        with summary_csv.open("w", encoding="utf-8") as handle:
-            handle.write(",".join(keys) + "\n")
-            for row in rows:
-                handle.write(
-                    ",".join(
-                        "" if row.get(key) is None else str(row.get(key))
-                        for key in keys
-                    )
-                    + "\n"
-                )
+    with summary_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_COHORT_SUMMARY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
     return summary_csv
 
 

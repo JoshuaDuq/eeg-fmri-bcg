@@ -5,13 +5,19 @@ import mne
 import numpy as np
 import pytest
 
+from bcg_correction.provenance import (
+    CorrectionProvenance,
+    load_correction_provenance,
+)
 from bcgnet.compare.pairs import RecordingSet
 from bcgnet.compare.plots import metrics_row
 from bcgnet.compare.qc import (
     alpha_peak_height,
-    load_detector_peaks,
+    median_locked_ratio,
     method_qc_flags,
     remaining_ratio,
+    removal_profile,
+    shared_detector_provenance,
 )
 
 
@@ -81,23 +87,66 @@ def test_detector_peaks_load_from_a_pca_obs_provenance_file(
     vhdr.write_text("x", encoding="utf-8")
     (tmp_path / "BaselineEEG_sub0000_fastr_pcaobs.bcg.json").write_text(
         json.dumps(
-            {"peak_samples": [100, 900, 1700], "ecg_to_bcg_delay_seconds": 0.19}
+            {
+                "peak_samples": [100, 900, 1700],
+                "ecg_to_bcg_delay_seconds": 0.19,
+                "window_seconds": [-0.2, 0.7],
+                "rr_gap_fraction": 0.03,
+            }
         ),
         encoding="utf-8",
     )
-    loaded = load_detector_peaks(vhdr)
+    loaded = load_correction_provenance(vhdr)
     assert loaded is not None
-    peaks, delay = loaded
-    assert peaks.tolist() == [100, 900, 1700]
-    assert delay == pytest.approx(0.19)
+    assert loaded.peak_samples.tolist() == [100, 900, 1700]
+    assert loaded.delay_seconds == pytest.approx(0.19)
+    assert loaded.window_seconds == pytest.approx((-0.2, 0.7))
+    assert loaded.gap_fraction == pytest.approx(0.03)
 
 
 def test_detector_peaks_are_absent_without_a_provenance_file(
     tmp_path: Path,
 ) -> None:
-    vhdr = tmp_path / "BaselineEEG_sub0000_fastr_bcg.vhdr"
+    vhdr = tmp_path / "BaselineEEG_sub0000_fastr_aas.vhdr"
     vhdr.write_text("x", encoding="utf-8")
-    assert load_detector_peaks(vhdr) is None
+    assert load_correction_provenance(vhdr) is None
+
+
+def test_detector_provenance_requires_scoring_fields(tmp_path: Path) -> None:
+    vhdr = tmp_path / "BaselineEEG_sub0000_fastr_aas.vhdr"
+    vhdr.write_text("x", encoding="utf-8")
+    vhdr.with_suffix(".bcg.json").write_text(
+        json.dumps(
+            {
+                "peak_samples": [100, 900, 1700],
+                "ecg_to_bcg_delay_seconds": 0.19,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="window_seconds"):
+        load_correction_provenance(vhdr)
+
+
+def test_detector_provenance_must_match_across_bounded_arms(
+    tmp_path: Path,
+) -> None:
+    first = CorrectionProvenance(
+        peak_samples=np.asarray([100, 900, 1700]),
+        delay_seconds=0.19,
+        window_seconds=(-0.2, 0.7),
+        gap_fraction=0.0,
+    )
+    second = CorrectionProvenance(
+        peak_samples=np.asarray([100, 900, 1701]),
+        delay_seconds=0.19,
+        window_seconds=(-0.2, 0.7),
+        gap_fraction=0.0,
+    )
+
+    with pytest.raises(ValueError, match="inconsistent detector provenance"):
+        shared_detector_provenance({"aas": first, "pca_obs": second})
 
 
 def _raw(scale: float = 1.0, sfreq: float = 1000.0, n: int = 4000) -> mne.io.RawArray:
@@ -165,3 +214,47 @@ def test_metrics_row_keeps_every_arm_separate(tmp_path: Path) -> None:
     ]
     assert ratios == sorted(ratios, reverse=True)
     assert len(set(ratios)) == 3
+
+
+def test_profile_computation_errors_surface(tmp_path: Path, monkeypatch) -> None:
+    from bcg_correction import correction_report
+    from bcgnet.compare import pipeline
+
+    provenance = CorrectionProvenance(
+        peak_samples=np.asarray([100, 900, 1700]),
+        delay_seconds=0.19,
+        window_seconds=(-0.2, 0.7),
+        gap_fraction=0.0,
+    )
+    monkeypatch.setattr(pipeline, "detector_provenance", lambda recording: provenance)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("invalid profile input")
+
+    monkeypatch.setattr(correction_report, "compute_correction_profile", fail)
+
+    with pytest.raises(RuntimeError, match="invalid profile input"):
+        pipeline._collect_profiles(
+            _recording(tmp_path),
+            {"Raw": _raw(), "AAS": _raw(0.5)},
+            {},
+        )
+
+
+@pytest.mark.parametrize("metric", [median_locked_ratio, removal_profile])
+def test_locked_metric_errors_surface(monkeypatch, metric) -> None:
+    from bcgnet.compare import qc
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("invalid EEG geometry")
+
+    monkeypatch.setattr(qc, "delay_estimation_eeg", fail)
+
+    with pytest.raises(RuntimeError, match="invalid EEG geometry"):
+        metric(
+            _raw(),
+            _raw(0.5),
+            peak_samples=np.asarray([100, 900, 1700]),
+            delay_seconds=0.19,
+            window_seconds=(-0.2, 0.7),
+        )

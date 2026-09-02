@@ -20,6 +20,12 @@ docs/superpowers/
 data/
 outputs/
 results/
+# Experiment definitions are source; generated figures are not.
+experiments/**/*.png
+experiments/**/*.csv
+experiments/**/*.json
+experiments/**/*.npz
+experiments_v*/
 *.eeg
 *.vhdr
 *.vmrk

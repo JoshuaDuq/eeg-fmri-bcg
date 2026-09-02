@@ -1,1 +1,1 @@
-"""Compare AAS and BCGNet on FASTR-corrected recordings."""
+"""Compare every registered correction arm against the FASTR input."""

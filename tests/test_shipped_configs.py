@@ -9,28 +9,24 @@ from pathlib import Path
 
 import pytest
 
-from bcgnet.compare.arms import AAS, BCGNET, PCA_OBS
+from bcgnet.compare.arms import CLEAN_ARMS
 from bcgnet.compare.config import load_compare_config
 from bcgnet.config import load_config
 
 _REPO = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize(
-    "relative", ["config.yaml", "examples/config.yaml"]
-)
+@pytest.mark.parametrize("relative", ["config.yaml", "examples/config.yaml"])
 def test_training_configs_load(relative: str) -> None:
     config = load_config(_REPO / relative)
     assert config.preprocess.ecg_channel == "ECG"
 
 
-@pytest.mark.parametrize(
-    "relative", ["compare.yaml", "examples/compare.yaml"]
-)
+@pytest.mark.parametrize("relative", ["compare.yaml", "examples/compare.yaml"])
 def test_compare_configs_load_with_a_root_for_every_arm(relative: str) -> None:
     config = load_compare_config(_REPO / relative)
-    roots = {config.paths.root_for(arm) for arm in (AAS, PCA_OBS, BCGNET)}
-    assert len(roots) == 3
+    roots = {config.paths.root_for(arm) for arm in CLEAN_ARMS}
+    assert len(roots) == len(CLEAN_ARMS)
 
 
 def test_study_compare_config_points_at_the_study_training_config() -> None:

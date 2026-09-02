@@ -25,8 +25,8 @@ Do not install `vendor/requirement.yml`. Use this package's `pyproject.toml`.
 
 ## Study overrides
 
-Paper YAML is the reference (`num_epochs: 2500`, `batch_size: 1`, `es_patience: 25`, `new_fs: 100`, 3 s epochs). `config.yaml` keeps that epoch cap and patience, with `batch_size: 16`.
+Paper YAML is the reference (`num_epochs: 2500`, `batch_size: 1`, `es_patience: 25`, `new_fs: 100`, 3 s epochs). `config.yaml` carries those values unchanged, batch size included. `es_min_delta` (1e-5) is not exposed by the wrapper and stays at the vendor default.
 
 Upstream interpolates the whole 100 Hz residual back to the original rate. This wrapper interpolates **only the BCG estimate** and subtracts it from the original 1 kHz EEG (`bcgnet.writeback`), then writes BrainVision (`*_fastr_bcgnet.vhdr`).
 
-`bcgnet run` writes Before/After PSD (Raw vs BCGNet). Overlays against the AAS and PCA-OBS comparators come only from `bcgnet compare`.
+`bcg bcgnet` writes corrected BrainVision, one model per subject, and `cohort_summary.csv`. It draws no correction figures: BCGNet uses no cardiac markers, so the heartbeat-locked panels the report system is built on need an R train, which only `bcg compare` has. BCGNet therefore appears in the method-vs-method pages, scored against the detector output written by whichever bounded arm ran.

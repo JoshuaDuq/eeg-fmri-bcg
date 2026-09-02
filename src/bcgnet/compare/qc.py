@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+from scipy.signal import welch
 
 from bcg_correction.metrics import cardiac_locked_rms, delay_estimation_eeg
+from bcg_correction.provenance import (
+    CorrectionProvenance,
+    load_correction_provenance,
+)
 
 ALPHA_PEAK_BAND = (8.0, 13.0)
 ALPHA_PEAK_COLLAPSE = 0.5
+#: Below this, a locked average is too noisy to split into locked and not.
+MINIMUM_PROFILE_BEATS = 8
 
 
 def remaining_ratio(after: float, before: float) -> float | None:
@@ -60,22 +67,117 @@ def method_qc_flags(
     }
 
 
-def load_detector_peaks(vhdr: Path) -> tuple[np.ndarray, float] | None:
-    """Return (peak_samples, applied delay) from a bounded arm's provenance.
+def _alpha_power(data: np.ndarray, sampling_rate: float, nperseg: int) -> float:
+    freqs, power = welch(data, fs=sampling_rate, nperseg=nperseg, axis=-1)
+    inside = (freqs >= ALPHA_PEAK_BAND[0]) & (freqs <= ALPHA_PEAK_BAND[1])
+    return float(np.median(power[:, inside].sum(axis=1)))
 
-    Both bounded arms run the same independent detector and both write
-    ``<stem>.bcg.json``, so either one supplies the R train used to score
-    every arm's heartbeat-locked residual.
-    """
-    path = vhdr.parent / f"{vhdr.stem}.bcg.json"
-    if not path.is_file():
+
+def removal_profile(
+    raw,
+    cleaned,
+    *,
+    peak_samples: npt.NDArray[np.integer],
+    delay_seconds: float,
+    window_seconds: tuple[float, float],
+) -> dict[str, float | None]:
+    empty: dict[str, float | None] = {
+        "specificity": None,
+        "alpha_collateral_fraction": None,
+        "locked_removed_uv": None,
+        "collateral_uv": None,
+    }
+    if "ECG" not in raw.ch_names:
+        return empty
+    ecg_index = raw.ch_names.index("ECG")
+    sampling_rate = float(raw.info["sfreq"])
+    window = (
+        delay_seconds + window_seconds[0],
+        delay_seconds + window_seconds[1],
+    )
+    start = round(window[0] * sampling_rate)
+    span = round(window[1] * sampling_rate) - start
+    before = delay_estimation_eeg(
+        raw.get_data(), raw.ch_names, ecg_channel_index=ecg_index
+    ) * 1e6
+    after = delay_estimation_eeg(
+        cleaned.get_data(), cleaned.ch_names, ecg_channel_index=ecg_index
+    ) * 1e6
+    if before.shape != after.shape or span < 2:
+        return empty
+    before = before - np.median(before, axis=1, keepdims=True)
+    after = after - np.median(after, axis=1, keepdims=True)
+    starts = np.asarray(peak_samples, dtype=np.int64) + start
+    keep = (starts >= 0) & (starts + span <= before.shape[1])
+    starts = starts[keep]
+    if starts.size < MINIMUM_PROFILE_BEATS:
+        return empty
+    index = starts[:, None] + np.arange(span)[None, :]
+    removed = (before - after)[:, index]
+    locked = removed.mean(axis=1)
+    nonlocked = removed - locked[:, None, :]
+    total_rms = np.sqrt(np.mean(removed**2, axis=(1, 2)))
+    locked_rms = np.sqrt(np.mean(locked**2, axis=1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        specificity = float(
+            np.median(locked_rms / np.where(total_rms > 0, total_rms, np.nan))
+        )
+    channels = removed.shape[0]
+    nperseg = int(min(span, 1024))
+    raw_alpha = _alpha_power(
+        before[:, index].reshape(channels, -1), sampling_rate, nperseg
+    )
+    collateral_alpha = _alpha_power(
+        nonlocked.reshape(channels, -1), sampling_rate, nperseg
+    )
+    return {
+        "specificity": specificity,
+        "alpha_collateral_fraction": (
+            collateral_alpha / raw_alpha if raw_alpha else None
+        ),
+        "locked_removed_uv": float(np.median(locked_rms)),
+        "collateral_uv": float(
+            np.median(np.sqrt(np.maximum(total_rms**2 - locked_rms**2, 0.0)))
+        ),
+    }
+
+
+def shared_detector_provenance(
+    provenances: Mapping[str, CorrectionProvenance],
+) -> CorrectionProvenance | None:
+    iterator = iter(provenances.items())
+    first = next(iterator, None)
+    if first is None:
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    peaks = payload.get("peak_samples")
-    if not peaks:
-        return None
-    delay = float(payload.get("ecg_to_bcg_delay_seconds") or 0.0)
-    return np.asarray(peaks, dtype=np.int64), delay
+    reference_arm, reference = first
+    for arm, candidate in iterator:
+        matches = (
+            np.array_equal(reference.peak_samples, candidate.peak_samples)
+            and reference.delay_seconds == candidate.delay_seconds
+            and reference.window_seconds == candidate.window_seconds
+            and reference.gap_fraction == candidate.gap_fraction
+        )
+        if not matches:
+            raise ValueError(
+                "inconsistent detector provenance between "
+                f"{reference_arm} and {arm}"
+            )
+    return reference
+
+
+def load_shared_detector_provenance(
+    vhdr_by_arm: Mapping[str, Path],
+) -> CorrectionProvenance | None:
+    provenances: dict[str, CorrectionProvenance] = {}
+    for arm, vhdr in vhdr_by_arm.items():
+        provenance = load_correction_provenance(vhdr)
+        if provenance is None:
+            raise FileNotFoundError(
+                f"missing detector provenance for {arm}: "
+                f"{vhdr.with_suffix('.bcg.json')}"
+            )
+        provenances[arm] = provenance
+    return shared_detector_provenance(provenances)
 
 
 def median_locked_ratio(
@@ -86,7 +188,6 @@ def median_locked_ratio(
     delay_seconds: float,
     window_seconds: tuple[float, float],
 ) -> float | None:
-    """Heartbeat-locked residual of cleaned vs raw (posterior, ECG-regressed)."""
     if "ECG" not in raw.ch_names:
         return None
     ecg_index = raw.ch_names.index("ECG")
@@ -95,31 +196,28 @@ def median_locked_ratio(
         delay_seconds + window_seconds[0],
         delay_seconds + window_seconds[1],
     )
-    try:
-        before = delay_estimation_eeg(
-            raw.get_data(),
-            raw.ch_names,
-            ecg_channel_index=ecg_index,
-        ) * 1e6
-        after = delay_estimation_eeg(
-            cleaned.get_data(),
-            cleaned.ch_names,
-            ecg_channel_index=ecg_index,
-        ) * 1e6
-        before_rms = cardiac_locked_rms(
-            before,
-            peak_samples,
-            sampling_rate_hz=sampling_rate,
-            window_seconds=locked_window,
-        )
-        after_rms = cardiac_locked_rms(
-            after,
-            peak_samples,
-            sampling_rate_hz=sampling_rate,
-            window_seconds=locked_window,
-        )
-    except Exception:
-        return None
+    before = delay_estimation_eeg(
+        raw.get_data(),
+        raw.ch_names,
+        ecg_channel_index=ecg_index,
+    ) * 1e6
+    after = delay_estimation_eeg(
+        cleaned.get_data(),
+        cleaned.ch_names,
+        ecg_channel_index=ecg_index,
+    ) * 1e6
+    before_rms = cardiac_locked_rms(
+        before,
+        peak_samples,
+        sampling_rate_hz=sampling_rate,
+        window_seconds=locked_window,
+    )
+    after_rms = cardiac_locked_rms(
+        after,
+        peak_samples,
+        sampling_rate_hz=sampling_rate,
+        window_seconds=locked_window,
+    )
     before_median = float(np.median(before_rms))
     if before_median == 0.0:
         return None

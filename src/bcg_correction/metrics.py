@@ -23,6 +23,15 @@ class ToneTransfer:
 
 
 @dataclass(frozen=True, slots=True)
+class IncrementalTransfer:
+    """Recovery of a known signal added to a real recording."""
+
+    gain: float
+    relative_error: float
+    cosine_similarity: float
+
+
+@dataclass(frozen=True, slots=True)
 class BcgDelayScan:
     """Trigger-locked BCG energy as a function of ECG-to-BCG delay."""
 
@@ -47,6 +56,269 @@ def is_posterior_eeg_channel(name: str) -> bool:
     return token.startswith(("PO", "CP", "TP", "OZ", "O", "P", "IZ"))
 
 
+def _validate_signal(signal: npt.ArrayLike, *, name: str) -> np.ndarray:
+    values = np.asarray(signal)
+    if values.ndim != 1 or values.size < 2:
+        raise MetricInputError(f"{name} must be a one-dimensional signal")
+    if np.issubdtype(values.dtype, np.bool_) or not np.issubdtype(
+        values.dtype, np.number
+    ):
+        raise MetricInputError(f"{name} must contain finite numbers")
+    values = values.astype(np.float64, copy=False)
+    if not np.all(np.isfinite(values)):
+        raise MetricInputError(f"{name} must contain finite numbers")
+    return values
+
+
+def _validate_recording(data: npt.ArrayLike) -> np.ndarray:
+    recording = np.asarray(data)
+    if recording.ndim != 2 or recording.shape[0] == 0 or recording.shape[1] == 0:
+        raise MetricInputError("data must have shape (channels, samples)")
+    if np.issubdtype(recording.dtype, np.bool_) or not np.issubdtype(
+        recording.dtype, np.number
+    ):
+        raise MetricInputError("data must contain finite numbers")
+    if not np.all(np.isfinite(recording)):
+        raise MetricInputError("data must contain finite numbers")
+    return recording.astype(np.float64, copy=False)
+
+
+def _validate_sampling_rate(sampling_rate_hz: float) -> float:
+    if (
+        isinstance(sampling_rate_hz, bool)
+        or not isinstance(sampling_rate_hz, Real)
+        or not math.isfinite(float(sampling_rate_hz))
+        or sampling_rate_hz <= 0.0
+    ):
+        raise MetricInputError("sampling rate must be finite and positive")
+    return float(sampling_rate_hz)
+
+
+def _validate_frequency(frequency: float, sampling_rate: float) -> None:
+    if (
+        isinstance(frequency, bool)
+        or not isinstance(frequency, Real)
+        or not math.isfinite(float(frequency))
+        or frequency <= 0.0
+    ):
+        raise MetricInputError("frequency must be finite and positive")
+    if (
+        isinstance(sampling_rate, bool)
+        or not isinstance(sampling_rate, Real)
+        or not math.isfinite(float(sampling_rate))
+        or sampling_rate <= 0.0
+    ):
+        raise MetricInputError("sampling rate must be finite and positive")
+    if frequency >= 0.5 * sampling_rate:
+        raise MetricInputError("frequency must stay below the Nyquist frequency")
+
+
+def _validate_band(low: float, high: float, sampling_rate: float) -> None:
+    _validate_frequency(high, sampling_rate)
+    if (
+        isinstance(low, bool)
+        or not isinstance(low, Real)
+        or not math.isfinite(float(low))
+        or low < 0.0
+        or low >= high
+    ):
+        raise MetricInputError("the band must be positive and increasing")
+
+
+def _validate_triggers(
+    triggers: npt.ArrayLike,
+    *,
+    epoch_samples: int,
+    sample_count: int,
+) -> np.ndarray:
+    if not isinstance(epoch_samples, int) or epoch_samples < 1:
+        raise MetricInputError("epoch samples must be a positive integer")
+    positions = np.asarray(triggers)
+    if positions.ndim != 1 or positions.size == 0:
+        raise MetricInputError("triggers must be a nonempty one-dimensional array")
+    if np.issubdtype(positions.dtype, np.bool_) or not np.issubdtype(
+        positions.dtype, np.number
+    ):
+        raise MetricInputError("triggers must contain finite numbers")
+    positions = positions.astype(np.float64, copy=False)
+    if not np.all(np.isfinite(positions)) or np.any(positions < 0.0):
+        raise MetricInputError("triggers must contain finite nonnegative numbers")
+    if np.any(np.diff(positions) <= 0.0):
+        raise MetricInputError("triggers must be strictly increasing")
+    if positions[-1] + epoch_samples - 1.0 > sample_count - 1:
+        raise MetricInputError("the measured epochs extend beyond the recording")
+    return positions
+
+
+def _validate_cardiac_epoch_positions(
+    recording: np.ndarray,
+    peak_samples: npt.ArrayLike,
+    *,
+    sampling_rate_hz: float,
+    window_seconds: tuple[float, float],
+) -> tuple[np.ndarray, int]:
+    _validate_sampling_rate(sampling_rate_hz)
+    if (
+        not isinstance(window_seconds, tuple)
+        or len(window_seconds) != 2
+        or not all(
+            isinstance(value, Real)
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in window_seconds
+        )
+        or window_seconds[0] >= window_seconds[1]
+    ):
+        raise MetricInputError(
+            "window_seconds must be a finite increasing pair"
+        )
+    peaks = np.asarray(peak_samples)
+    if peaks.ndim != 1 or peaks.size == 0:
+        raise MetricInputError(
+            "peak_samples must be a nonempty one-dimensional array"
+        )
+    if np.issubdtype(peaks.dtype, np.bool_) or not np.issubdtype(
+        peaks.dtype,
+        np.integer,
+    ):
+        raise MetricInputError("peak_samples must contain integer samples")
+    peaks = peaks.astype(np.int64, copy=False)
+    if np.any(peaks < 0) or np.any(peaks >= recording.shape[1]):
+        raise MetricInputError(
+            "peak_samples must stay inside the recording"
+        )
+    if np.any(np.diff(peaks) <= 0):
+        raise MetricInputError("peak_samples must be strictly increasing")
+    window_start = round(window_seconds[0] * sampling_rate_hz)
+    window_stop = round(window_seconds[1] * sampling_rate_hz)
+    epoch_samples = window_stop - window_start
+    if epoch_samples < 1:
+        raise MetricInputError("window_seconds is shorter than one sample")
+    positions = peaks + window_start
+    if positions[0] < 0 or positions[-1] + epoch_samples > recording.shape[1]:
+        raise MetricInputError(
+            "the measured cardiac epochs extend beyond the recording"
+        )
+    return positions.astype(np.float64), epoch_samples
+
+
+def _extract_fractional_epochs(
+    recording: np.ndarray,
+    positions: np.ndarray,
+    epoch_samples: int,
+) -> np.ndarray:
+    offsets = np.arange(epoch_samples, dtype=np.float64)
+    sample_positions = positions[:, np.newaxis] + offsets
+    lower = np.floor(sample_positions).astype(np.int64)
+    upper = np.minimum(lower + 1, recording.shape[1] - 1)
+    fraction = sample_positions - lower
+    return (
+        recording[:, lower] * (1.0 - fraction[np.newaxis, :, :])
+        + recording[:, upper] * fraction[np.newaxis, :, :]
+    )
+
+
+def _cardiac_epochs(
+    recording: np.ndarray,
+    peak_samples: npt.ArrayLike,
+    *,
+    sampling_rate_hz: float,
+    window_seconds: tuple[float, float],
+) -> np.ndarray:
+    positions, epoch_samples = _validate_cardiac_epoch_positions(
+        recording,
+        peak_samples,
+        sampling_rate_hz=sampling_rate_hz,
+        window_seconds=window_seconds,
+    )
+    return _extract_fractional_epochs(recording, positions, epoch_samples)
+
+
+def _validate_delay_grid(delays_seconds: tuple[float, ...]) -> tuple[float, ...]:
+    if not isinstance(delays_seconds, tuple) or not delays_seconds:
+        raise MetricInputError("delays_seconds must be a nonempty tuple")
+    delays = []
+    for delay in delays_seconds:
+        if (
+            isinstance(delay, bool)
+            or not isinstance(delay, Real)
+            or not math.isfinite(float(delay))
+            or float(delay) < 0.0
+        ):
+            raise MetricInputError(
+                "delays_seconds must contain finite nonnegative numbers"
+            )
+        delays.append(float(delay))
+    if any(left >= right for left, right in pairwise(delays)):
+        raise MetricInputError("delays_seconds must be strictly increasing")
+    return tuple(delays)
+
+
+def _validate_delay_window(
+    window_seconds: tuple[float, float],
+    sampling_rate: float,
+) -> tuple[int, int]:
+    if (
+        not isinstance(window_seconds, tuple)
+        or len(window_seconds) != 2
+        or not all(
+            isinstance(value, Real)
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in window_seconds
+        )
+        or window_seconds[0] >= window_seconds[1]
+    ):
+        raise MetricInputError("window_seconds must be a finite increasing pair")
+    rel_start = round(window_seconds[0] * sampling_rate)
+    epoch_samples = round(window_seconds[1] * sampling_rate) - rel_start
+    if epoch_samples < 1:
+        raise MetricInputError("window_seconds is shorter than one sample")
+    return rel_start, epoch_samples
+
+
+def _validate_delay_peaks(
+    peak_samples: npt.ArrayLike,
+    sample_count: int,
+) -> np.ndarray:
+    peaks = np.asarray(peak_samples)
+    if peaks.ndim != 1 or peaks.size < 2:
+        raise MetricInputError("peak_samples must contain at least two events")
+    if np.issubdtype(peaks.dtype, np.bool_) or not np.issubdtype(
+        peaks.dtype,
+        np.integer,
+    ):
+        raise MetricInputError("peak_samples must contain integer samples")
+    peaks = peaks.astype(np.int64, copy=False)
+    if np.any(peaks < 0) or np.any(peaks >= sample_count):
+        raise MetricInputError("peak_samples must stay inside the recording")
+    if np.any(np.diff(peaks) <= 0):
+        raise MetricInputError("peak_samples must be strictly increasing")
+    return peaks
+
+
+def _tone_basis(
+    sample_count: int,
+    frequency: float,
+    sampling_rate: float,
+) -> np.ndarray:
+    times = np.arange(sample_count, dtype=np.float64) / sampling_rate
+    return np.stack(
+        [np.sin(2 * np.pi * frequency * times), np.cos(2 * np.pi * frequency * times)],
+        axis=1,
+    )
+
+
+def _project(basis: np.ndarray, signal: np.ndarray) -> complex:
+    coefficients, *_ = np.linalg.lstsq(basis, signal, rcond=None)
+    return complex(coefficients[0], coefficients[1])
+
+
+def _band_power(signal: np.ndarray, inside: np.ndarray) -> float:
+    spectrum = np.fft.rfft(signal)
+    return float(np.sum(np.abs(spectrum[inside]) ** 2))
+
+
 def regress_out_reference(
     data: npt.ArrayLike,
     reference: npt.ArrayLike,
@@ -68,8 +340,39 @@ def regress_out_reference(
     if energy == 0.0:
         return recording.copy()
     row_centre = recording - np.median(recording, axis=1, keepdims=True)
-    scales = (row_centre @ centred) / energy
+    scales = np.einsum("ij,j->i", row_centre, centred) / energy
     return recording - scales[:, np.newaxis] * centred
+
+
+def incremental_signal_transfer(
+    injected: npt.ArrayLike,
+    corrected_increment: npt.ArrayLike,
+) -> IncrementalTransfer:
+    """Measure the incremental response to a known injected EEG signal."""
+    reference = _validate_recording(injected)
+    recovered = _validate_recording(corrected_increment)
+    if recovered.shape != reference.shape:
+        raise MetricInputError(
+            "corrected_increment must have the same shape as injected"
+        )
+    reference_energy = float(np.einsum("ij,ij->", reference, reference))
+    if reference_energy == 0.0:
+        raise MetricInputError("injected signal must have nonzero energy")
+    cross_product = float(np.einsum("ij,ij->", reference, recovered))
+    recovered_energy = float(np.einsum("ij,ij->", recovered, recovered))
+    relative_error = np.linalg.norm(recovered - reference) / math.sqrt(
+        reference_energy
+    )
+    cosine_similarity = (
+        cross_product / math.sqrt(reference_energy * recovered_energy)
+        if recovered_energy > 0.0
+        else 0.0
+    )
+    return IncrementalTransfer(
+        gain=cross_product / reference_energy,
+        relative_error=float(relative_error),
+        cosine_similarity=cosine_similarity,
+    )
 
 
 def delay_estimation_eeg(
@@ -455,265 +758,3 @@ def circular_shifted_cardiac_null(
         )
     return null_values
 
-
-def _validate_signal(signal: npt.ArrayLike, *, name: str) -> np.ndarray:
-    values = np.asarray(signal)
-    if values.ndim != 1 or values.size < 2:
-        raise MetricInputError(f"{name} must be a one-dimensional signal")
-    if np.issubdtype(values.dtype, np.bool_) or not np.issubdtype(
-        values.dtype, np.number
-    ):
-        raise MetricInputError(f"{name} must contain finite numbers")
-    values = values.astype(np.float64, copy=False)
-    if not np.all(np.isfinite(values)):
-        raise MetricInputError(f"{name} must contain finite numbers")
-    return values
-
-
-def _validate_recording(data: npt.ArrayLike) -> np.ndarray:
-    recording = np.asarray(data)
-    if recording.ndim != 2 or recording.shape[0] == 0 or recording.shape[1] == 0:
-        raise MetricInputError("data must have shape (channels, samples)")
-    if np.issubdtype(recording.dtype, np.bool_) or not np.issubdtype(
-        recording.dtype, np.number
-    ):
-        raise MetricInputError("data must contain finite numbers")
-    if not np.all(np.isfinite(recording)):
-        raise MetricInputError("data must contain finite numbers")
-    return recording.astype(np.float64, copy=False)
-
-
-def _validate_frequency(frequency: float, sampling_rate: float) -> None:
-    if (
-        isinstance(frequency, bool)
-        or not isinstance(frequency, Real)
-        or not math.isfinite(float(frequency))
-        or frequency <= 0.0
-    ):
-        raise MetricInputError("frequency must be finite and positive")
-    if (
-        isinstance(sampling_rate, bool)
-        or not isinstance(sampling_rate, Real)
-        or not math.isfinite(float(sampling_rate))
-        or sampling_rate <= 0.0
-    ):
-        raise MetricInputError("sampling rate must be finite and positive")
-    if frequency >= 0.5 * sampling_rate:
-        raise MetricInputError("frequency must stay below the Nyquist frequency")
-
-
-def _validate_band(low: float, high: float, sampling_rate: float) -> None:
-    _validate_frequency(high, sampling_rate)
-    if (
-        isinstance(low, bool)
-        or not isinstance(low, Real)
-        or not math.isfinite(float(low))
-        or low < 0.0
-        or low >= high
-    ):
-        raise MetricInputError("the band must be positive and increasing")
-
-
-def _validate_triggers(
-    triggers: npt.ArrayLike,
-    *,
-    epoch_samples: int,
-    sample_count: int,
-) -> np.ndarray:
-    if not isinstance(epoch_samples, int) or epoch_samples < 1:
-        raise MetricInputError("epoch samples must be a positive integer")
-    positions = np.asarray(triggers)
-    if positions.ndim != 1 or positions.size == 0:
-        raise MetricInputError("triggers must be a nonempty one-dimensional array")
-    if np.issubdtype(positions.dtype, np.bool_) or not np.issubdtype(
-        positions.dtype, np.number
-    ):
-        raise MetricInputError("triggers must contain finite numbers")
-    positions = positions.astype(np.float64, copy=False)
-    if not np.all(np.isfinite(positions)) or np.any(positions < 0.0):
-        raise MetricInputError("triggers must contain finite nonnegative numbers")
-    if np.any(np.diff(positions) <= 0.0):
-        raise MetricInputError("triggers must be strictly increasing")
-    if positions[-1] + epoch_samples - 1.0 > sample_count - 1:
-        raise MetricInputError("the measured epochs extend beyond the recording")
-    return positions
-
-
-def _cardiac_epochs(
-    recording: np.ndarray,
-    peak_samples: npt.ArrayLike,
-    *,
-    sampling_rate_hz: float,
-    window_seconds: tuple[float, float],
-) -> np.ndarray:
-    positions, epoch_samples = _validate_cardiac_epoch_positions(
-        recording,
-        peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        window_seconds=window_seconds,
-    )
-    return _extract_fractional_epochs(recording, positions, epoch_samples)
-
-
-def _validate_cardiac_epoch_positions(
-    recording: np.ndarray,
-    peak_samples: npt.ArrayLike,
-    *,
-    sampling_rate_hz: float,
-    window_seconds: tuple[float, float],
-) -> tuple[np.ndarray, int]:
-    _validate_sampling_rate(sampling_rate_hz)
-    if (
-        not isinstance(window_seconds, tuple)
-        or len(window_seconds) != 2
-        or not all(
-            isinstance(value, Real)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in window_seconds
-        )
-        or window_seconds[0] >= window_seconds[1]
-    ):
-        raise MetricInputError(
-            "window_seconds must be a finite increasing pair"
-        )
-    peaks = np.asarray(peak_samples)
-    if peaks.ndim != 1 or peaks.size == 0:
-        raise MetricInputError(
-            "peak_samples must be a nonempty one-dimensional array"
-        )
-    if np.issubdtype(peaks.dtype, np.bool_) or not np.issubdtype(
-        peaks.dtype,
-        np.integer,
-    ):
-        raise MetricInputError("peak_samples must contain integer samples")
-    peaks = peaks.astype(np.int64, copy=False)
-    if np.any(peaks < 0) or np.any(peaks >= recording.shape[1]):
-        raise MetricInputError(
-            "peak_samples must stay inside the recording"
-        )
-    if np.any(np.diff(peaks) <= 0):
-        raise MetricInputError("peak_samples must be strictly increasing")
-    window_start = round(window_seconds[0] * sampling_rate_hz)
-    window_stop = round(window_seconds[1] * sampling_rate_hz)
-    epoch_samples = window_stop - window_start
-    if epoch_samples < 1:
-        raise MetricInputError("window_seconds is shorter than one sample")
-    positions = peaks + window_start
-    if positions[0] < 0 or positions[-1] + epoch_samples > recording.shape[1]:
-        raise MetricInputError(
-            "the measured cardiac epochs extend beyond the recording"
-        )
-    return positions.astype(np.float64), epoch_samples
-
-
-def _validate_delay_grid(delays_seconds: tuple[float, ...]) -> tuple[float, ...]:
-    if not isinstance(delays_seconds, tuple) or not delays_seconds:
-        raise MetricInputError("delays_seconds must be a nonempty tuple")
-    delays = []
-    for delay in delays_seconds:
-        if (
-            isinstance(delay, bool)
-            or not isinstance(delay, Real)
-            or not math.isfinite(float(delay))
-            or float(delay) < 0.0
-        ):
-            raise MetricInputError(
-                "delays_seconds must contain finite nonnegative numbers"
-            )
-        delays.append(float(delay))
-    if any(left >= right for left, right in pairwise(delays)):
-        raise MetricInputError("delays_seconds must be strictly increasing")
-    return tuple(delays)
-
-
-def _validate_delay_window(
-    window_seconds: tuple[float, float],
-    sampling_rate: float,
-) -> tuple[int, int]:
-    if (
-        not isinstance(window_seconds, tuple)
-        or len(window_seconds) != 2
-        or not all(
-            isinstance(value, Real)
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in window_seconds
-        )
-        or window_seconds[0] >= window_seconds[1]
-    ):
-        raise MetricInputError("window_seconds must be a finite increasing pair")
-    rel_start = round(window_seconds[0] * sampling_rate)
-    epoch_samples = round(window_seconds[1] * sampling_rate) - rel_start
-    if epoch_samples < 1:
-        raise MetricInputError("window_seconds is shorter than one sample")
-    return rel_start, epoch_samples
-
-
-def _validate_delay_peaks(
-    peak_samples: npt.ArrayLike,
-    sample_count: int,
-) -> np.ndarray:
-    peaks = np.asarray(peak_samples)
-    if peaks.ndim != 1 or peaks.size < 2:
-        raise MetricInputError("peak_samples must contain at least two events")
-    if np.issubdtype(peaks.dtype, np.bool_) or not np.issubdtype(
-        peaks.dtype,
-        np.integer,
-    ):
-        raise MetricInputError("peak_samples must contain integer samples")
-    peaks = peaks.astype(np.int64, copy=False)
-    if np.any(peaks < 0) or np.any(peaks >= sample_count):
-        raise MetricInputError("peak_samples must stay inside the recording")
-    if np.any(np.diff(peaks) <= 0):
-        raise MetricInputError("peak_samples must be strictly increasing")
-    return peaks
-
-
-def _validate_sampling_rate(sampling_rate_hz: float) -> float:
-    if (
-        isinstance(sampling_rate_hz, bool)
-        or not isinstance(sampling_rate_hz, Real)
-        or not math.isfinite(float(sampling_rate_hz))
-        or sampling_rate_hz <= 0.0
-    ):
-        raise MetricInputError("sampling rate must be finite and positive")
-    return float(sampling_rate_hz)
-
-
-def _extract_fractional_epochs(
-    recording: np.ndarray,
-    positions: np.ndarray,
-    epoch_samples: int,
-) -> np.ndarray:
-    offsets = np.arange(epoch_samples, dtype=np.float64)
-    sample_positions = positions[:, np.newaxis] + offsets
-    lower = np.floor(sample_positions).astype(np.int64)
-    upper = np.minimum(lower + 1, recording.shape[1] - 1)
-    fraction = sample_positions - lower
-    return (
-        recording[:, lower] * (1.0 - fraction[np.newaxis, :, :])
-        + recording[:, upper] * fraction[np.newaxis, :, :]
-    )
-
-
-def _tone_basis(
-    sample_count: int,
-    frequency: float,
-    sampling_rate: float,
-) -> np.ndarray:
-    times = np.arange(sample_count, dtype=np.float64) / sampling_rate
-    return np.stack(
-        [np.sin(2 * np.pi * frequency * times), np.cos(2 * np.pi * frequency * times)],
-        axis=1,
-    )
-
-
-def _project(basis: np.ndarray, signal: np.ndarray) -> complex:
-    coefficients, *_ = np.linalg.lstsq(basis, signal, rcond=None)
-    return complex(coefficients[0], coefficients[1])
-
-
-def _band_power(signal: np.ndarray, inside: np.ndarray) -> float:
-    spectrum = np.fft.rfft(signal)
-    return float(np.sum(np.abs(spectrum[inside]) ** 2))

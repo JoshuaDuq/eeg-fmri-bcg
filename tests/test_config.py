@@ -103,7 +103,7 @@ def test_discover_lists_subject_folders(tmp_path: Path) -> None:
 
 def test_run_pattern_defaults_when_naming_is_absent(tmp_path: Path) -> None:
     """An existing config predating the section keeps working unchanged."""
-    from bcgnet.discovery import DEFAULT_RUN_PATTERN
+    from bcgstudy.discovery import DEFAULT_RUN_PATTERN
 
     config = load_config(_write_config(tmp_path))
     assert config.naming.run_pattern == DEFAULT_RUN_PATTERN

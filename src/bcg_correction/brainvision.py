@@ -183,55 +183,6 @@ def _validate_data_file_name(data_file_name: str) -> None:
         )
 
 
-def read_brainvision_markers(
-    path: str | PathLike[str],
-) -> tuple[str, tuple[BrainVisionMarker, ...]]:
-    """Read a strict BrainVision marker file without losing marker fields."""
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0] not in _MARKER_FILE_IDENTIFIERS:
-        raise BrainVisionMarkerError("invalid BrainVision marker-file identifier")
-
-    section: str | None = None
-    sections: list[str] = []
-    common_infos: dict[str, str] = {}
-    indexed_markers: list[tuple[int, BrainVisionMarker]] = []
-    user_info_records: list[tuple[int, int, tuple[str, ...]]] = []
-    for line in lines[1:]:
-        if not line or line.startswith(";"):
-            continue
-        if line.startswith("["):
-            section = _enter_marker_file_section(line, sections)
-        elif section == "[Common Infos]":
-            _parse_common_info_line(line, common_infos)
-        elif section == "[Marker Infos]":
-            indexed_markers.append(_parse_marker_line(line))
-        elif section == "[Marker User Infos]":
-            user_info_records.append(_parse_user_info_line(line))
-        else:
-            raise BrainVisionMarkerError(f"content outside a supported section: {line}")
-
-    if sections not in (
-        ["[Common Infos]", "[Marker Infos]"],
-        ["[Common Infos]", "[Marker Infos]", "[Marker User Infos]"],
-    ):
-        raise BrainVisionMarkerError(
-            "marker file must contain one Common Infos and one Marker Infos section"
-        )
-    if common_infos.get("Codepage") != "UTF-8":
-        raise BrainVisionMarkerError("Common Infos Codepage must be declared as UTF-8")
-    data_file_name = common_infos.get("DataFile")
-    if not data_file_name:
-        raise BrainVisionMarkerError("missing Common Infos DataFile declaration")
-    _validate_data_file_name(data_file_name)
-    indices = [index for index, _ in indexed_markers]
-    if indices != list(range(1, len(indices) + 1)):
-        raise BrainVisionMarkerError(
-            "marker indices must appear in exact Mk1, Mk2, ... file order"
-        )
-    markers = _attach_user_infos(indexed_markers, user_info_records)
-    return data_file_name, markers
-
-
 def _parse_user_info_line(line: str) -> tuple[int, int, tuple[str, ...]]:
     key, separator, value = line.partition("=")
     property_index_text = key.removeprefix("Prop")
@@ -280,6 +231,54 @@ def _attach_user_infos(
         )
         for index, marker in indexed_markers
     )
+
+
+def read_brainvision_markers(
+    path: str | PathLike[str],
+) -> tuple[str, tuple[BrainVisionMarker, ...]]:
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] not in _MARKER_FILE_IDENTIFIERS:
+        raise BrainVisionMarkerError("invalid BrainVision marker-file identifier")
+
+    section: str | None = None
+    sections: list[str] = []
+    common_infos: dict[str, str] = {}
+    indexed_markers: list[tuple[int, BrainVisionMarker]] = []
+    user_info_records: list[tuple[int, int, tuple[str, ...]]] = []
+    for line in lines[1:]:
+        if not line or line.startswith(";"):
+            continue
+        if line.startswith("["):
+            section = _enter_marker_file_section(line, sections)
+        elif section == "[Common Infos]":
+            _parse_common_info_line(line, common_infos)
+        elif section == "[Marker Infos]":
+            indexed_markers.append(_parse_marker_line(line))
+        elif section == "[Marker User Infos]":
+            user_info_records.append(_parse_user_info_line(line))
+        else:
+            raise BrainVisionMarkerError(f"content outside a supported section: {line}")
+
+    if sections not in (
+        ["[Common Infos]", "[Marker Infos]"],
+        ["[Common Infos]", "[Marker Infos]", "[Marker User Infos]"],
+    ):
+        raise BrainVisionMarkerError(
+            "marker file must contain one Common Infos and one Marker Infos section"
+        )
+    if common_infos.get("Codepage") != "UTF-8":
+        raise BrainVisionMarkerError("Common Infos Codepage must be declared as UTF-8")
+    data_file_name = common_infos.get("DataFile")
+    if not data_file_name:
+        raise BrainVisionMarkerError("missing Common Infos DataFile declaration")
+    _validate_data_file_name(data_file_name)
+    indices = [index for index, _ in indexed_markers]
+    if indices != list(range(1, len(indices) + 1)):
+        raise BrainVisionMarkerError(
+            "marker indices must appear in exact Mk1, Mk2, ... file order"
+        )
+    markers = _attach_user_infos(indexed_markers, user_info_records)
+    return data_file_name, markers
 
 
 def _format_marker_line(index: int, marker: BrainVisionMarker) -> str:

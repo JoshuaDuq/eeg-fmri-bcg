@@ -1,6 +1,6 @@
 # Template: BCGNet training.
 # Copy to the repository root as config.yaml and set the paths.
-# Comparison against AAS and PCA-OBS is examples/compare.yaml.
+# Comparison against the bounded arms is examples/compare.yaml.
 
 paths:
   fastr_root: /path/to/fastr_python

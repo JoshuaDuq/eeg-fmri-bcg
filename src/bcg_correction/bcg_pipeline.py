@@ -21,6 +21,11 @@ from .brainvision import BrainVisionMarker
 from .brainvision_io import read_brainvision_recording, write_brainvision_recording
 from .cardiac import CardiacDetection, CardiacInputError, detect_r_peaks
 from .cardiac_markers import append_pulse_markers, validate_fastr_marker_input
+from .correction_report import (
+    compute_correction_profile,
+    save_correction_report,
+    write_profile,
+)
 from .metrics import (
     RECORDING_DELAY_WINDOW_SECONDS,
     BcgDelayScan,
@@ -28,7 +33,6 @@ from .metrics import (
     delay_estimation_eeg,
     estimate_ecg_to_bcg_delay,
 )
-from .psd import PSD_FFT_SAMPLES, PSD_MAX_FREQUENCY_HZ, save_psd_plot
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +41,6 @@ class BcgCorrectionSummary:
 
     output_vhdr: Path
     provenance_json: Path
-    psd_before: Path
-    psd_after: Path
     method: str
     marker_count: int
     status: str
@@ -53,6 +55,23 @@ class BcgResidualQuality:
     after_median_rms_uv: float
     ratio: float
     maximum_allowed_ratio: float
+    #: Absolute residual below which the ratio no longer gates output.
+    residual_floor_uv: float
+
+
+#: The one degradation that does not make a recording uncorrectable.
+#:
+#: No template is subtracted where there is no detected beat, so an RR gap
+#: leaves full-amplitude BCG inside a bounded, identifiable span rather than
+#: corrupting anything. Those spans are marked bad in the output for downstream
+#: rejection, and their total share is capped by ``maximum_gap_fraction``.
+#:
+#: Every other degradation is fatal, and ``rr_below_minimum`` is why: an
+#: interval shorter than physiology means a spurious detection, which
+#: subtracts a template at a time when no beat occurred and so *injects*
+#: artifact. One failure mode leaves data uncorrected; the other makes it
+#: wrong, and only the first has a bounded downstream remedy.
+GAP_DEGRADATION_REASON = "rr_above_maximum"
 
 
 def _require_usable_detection(
@@ -63,131 +82,39 @@ def _require_usable_detection(
         if reasons:
             raise CardiacInputError("inconsistent ECG detection quality")
         return
-    if reasons:
-        detail = ", ".join(reasons)
+    if not reasons:
+        raise CardiacInputError("degraded ECG detection")
+    fatal = tuple(
+        reason for reason in reasons if reason != GAP_DEGRADATION_REASON
+    )
+    if fatal:
+        detail = ", ".join(fatal)
         raise CardiacInputError(f"degraded ECG detection: {detail}")
-    raise CardiacInputError("degraded ECG detection")
 
 
-def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
-    """Detect independent R peaks and subtract BCG from EEG channels only."""
-    source = read_brainvision_recording(config.input_vhdr)
-    validate_fastr_marker_input(source.markers)
-    output_vhdr = config.output_vhdr.expanduser().resolve()
-    output_paths = _output_paths(output_vhdr)
-    _ensure_outputs_are_absent(output_paths)
+def _require_tolerable_gaps(
+    gap_spans: tuple[tuple[int, int], ...],
+    *,
+    sample_count: int,
+    maximum_gap_fraction: float,
+) -> float:
+    """Return the share of the recording inside RR gaps, refusing too much.
 
-    raw = mne.io.read_raw_brainvision(
-        config.input_vhdr, preload=True, verbose="ERROR"
-    )
-    try:
-        names = tuple(raw.ch_names)
-        sampling_rate_hz = float(raw.info["sfreq"])
-        data = np.asarray(raw.get_data(), dtype=np.float64)
-        before_raw = raw.copy()
-    finally:
-        raw.close()
-
-    ecg_index = _channel_index(names, config.detector.ecg_channel)
-    eeg_picks = np.array(
-        [index for index in range(len(names)) if index != ecg_index],
-        dtype=np.int64,
-    )
-    detection = detect_r_peaks(
-        data[ecg_index],
-        sampling_rate_hz,
-        config=config.detector,
-    )
-    _require_usable_detection(detection)
-    delay_scan = estimate_ecg_to_bcg_delay(
-        delay_estimation_eeg(
-            data,
-            names,
-            ecg_channel_index=ecg_index,
-        ),
-        detection.peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-    )
-    correction = correct_bcg(
-        data,
-        detection.peak_samples,
-        sampling_rate_hz,
-        channel_names=names,
-        eeg_picks=eeg_picks,
-        ecg_channel_index=ecg_index,
-        config=BcgCorrectionConfig(
-            method=config.method,
-            window_seconds=config.window_seconds,
-            ecg_to_bcg_delay_seconds=delay_scan.best_delay_seconds,
-            aas_neighbor_count=config.aas_neighbor_count,
-            pca_obs_components=config.pca_obs_components,
-        ),
-    )
-    residual_quality = _measure_residual_quality(
-        data,
-        correction.data_volts,
-        names,
-        ecg_index=ecg_index,
-        peak_samples=detection.peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        delay_seconds=delay_scan.best_delay_seconds,
-        window_seconds=config.window_seconds,
-        maximum_ratio=config.maximum_residual_ratio,
-    )
-    psd_tmin, psd_tmax, psd_n_fft = _bcg_psd_interval(
-        correction.corrected_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        sample_count=data.shape[1],
-    )
-    rr_gaps = rr_gap_spans(
-        detection.peak_samples,
-        sampling_rate_hz,
-        config.detector.maximum_rr_seconds,
-    )
-    markers = append_pulse_markers(
-        source.markers,
-        detection.peak_samples,
-        sample_count=data.shape[1],
-    ) + _bad_bcg_markers(rr_gaps, sample_count=data.shape[1])
-    write_brainvision_recording(
-        data=correction.data_volts,
-        sampling_rate=sampling_rate_hz,
-        channel_names=names,
-        output_vhdr=output_paths["vhdr"],
-        markers=markers,
-    )
-    _save_bcg_psd_plots(
-        before_raw,
-        output_paths["vhdr"],
-        output_paths,
-        sampling_rate_hz=sampling_rate_hz,
-        psd_tmin=psd_tmin,
-        psd_tmax=psd_tmax,
-        psd_n_fft=psd_n_fft,
-    )
-    _write_provenance(
-        output_paths["json"],
-        config=config,
-        detection=detection,
-        correction=correction,
-        sampling_rate_hz=sampling_rate_hz,
-        gap_spans=rr_gaps,
-        delay_scan=delay_scan,
-        residual_quality=residual_quality,
-        output_paths=output_paths,
-        psd_tmin=psd_tmin,
-        psd_tmax=psd_tmax,
-    )
-    return BcgCorrectionSummary(
-        output_vhdr=output_paths["vhdr"],
-        provenance_json=output_paths["json"],
-        psd_before=output_paths["psd_before"],
-        psd_after=output_paths["psd_after"],
-        method=config.method,
-        marker_count=int(detection.peak_samples.size),
-        status=detection.quality.status,
-        applied_delay_seconds=delay_scan.best_delay_seconds,
-    )
+    A recording whose gaps dominate is not one with a few uncorrected spans;
+    it is one whose detected beats cannot be trusted either, so it is refused
+    rather than quietly half-corrected.
+    """
+    if sample_count <= 0:
+        raise CardiacInputError("recording has no samples")
+    covered = sum(stop - start for start, stop in gap_spans)
+    fraction = covered / sample_count
+    if fraction > maximum_gap_fraction:
+        raise CardiacInputError(
+            f"RR gaps cover {fraction:.2%} of the recording across "
+            f"{len(gap_spans)} gap(s), above the "
+            f"{maximum_gap_fraction:.2%} maximum"
+        )
+    return fraction
 
 
 def _output_paths(output_vhdr: Path) -> dict[str, Path]:
@@ -196,90 +123,10 @@ def _output_paths(output_vhdr: Path) -> dict[str, Path]:
         "vhdr": output_vhdr,
         "eeg": output_vhdr.with_suffix(".eeg"),
         "vmrk": output_vhdr.with_suffix(".vmrk"),
+        "report": Path(f"{stem}_correction_report.png"),
+        "profile": Path(f"{stem}_profile.npz"),
         "json": output_vhdr.with_suffix(".bcg.json"),
-        "psd_before": stem.with_name(f"{stem.name}_psd_before.png"),
-        "psd_after": stem.with_name(f"{stem.name}_psd_after.png"),
     }
-
-
-def _bcg_psd_interval(
-    corrected_samples: np.ndarray,
-    *,
-    sampling_rate_hz: float,
-    sample_count: int,
-) -> tuple[float, float, int]:
-    values = np.asarray(corrected_samples)
-    if values.ndim != 1 or values.size < 2:
-        raise BcgInputError("BCG PSD requires at least two corrected samples")
-    if not np.issubdtype(values.dtype, np.integer):
-        raise BcgInputError("BCG corrected samples must be integer positions")
-    values = values.astype(np.int64, copy=False)
-    if np.any(values < 0) or np.any(values >= sample_count):
-        raise BcgInputError("BCG corrected samples exceed the recording")
-    if np.any(np.diff(values) <= 0):
-        raise BcgInputError("BCG corrected samples must be strictly increasing")
-    runs = np.split(values, np.flatnonzero(np.diff(values) > 1) + 1)
-    longest = max(runs, key=lambda run: run.size)
-    span_samples = int(longest.size)
-    n_fft = min(PSD_FFT_SAMPLES, span_samples)
-    if n_fft < 2:
-        raise BcgInputError("BCG PSD requires two samples per corrected window")
-    return (
-        float(longest[0]) / sampling_rate_hz,
-        float(longest[-1] + 1) / sampling_rate_hz,
-        n_fft,
-    )
-
-
-def _prepare_bcg_psd_raw(raw: mne.io.BaseRaw) -> mne.io.BaseRaw:
-    prepared = raw.copy()
-    keep = prepared.annotations.description != "Bad Interval/Bad_Gradient"
-    prepared.set_annotations(prepared.annotations[keep])
-    return prepared
-
-
-def _save_bcg_psd_plots(
-    before_raw: mne.io.BaseRaw,
-    output_vhdr: Path,
-    output_paths: dict[str, Path],
-    *,
-    sampling_rate_hz: float,
-    psd_tmin: float,
-    psd_tmax: float,
-    psd_n_fft: int,
-) -> None:
-    corrected_raw = mne.io.read_raw_brainvision(
-        output_vhdr,
-        preload=False,
-        verbose="ERROR",
-    )
-    before_psd_raw = _prepare_bcg_psd_raw(before_raw)
-    after_psd_raw = _prepare_bcg_psd_raw(corrected_raw)
-    fmax = min(PSD_MAX_FREQUENCY_HZ, sampling_rate_hz / 2.0)
-    try:
-        save_psd_plot(
-            before_psd_raw,
-            output_paths["psd_before"],
-            title="Before BCG correction",
-            fmax=fmax,
-            tmin=psd_tmin,
-            tmax=psd_tmax,
-            n_fft=psd_n_fft,
-        )
-        save_psd_plot(
-            after_psd_raw,
-            output_paths["psd_after"],
-            title="After BCG correction",
-            fmax=fmax,
-            tmin=psd_tmin,
-            tmax=psd_tmax,
-            n_fft=psd_n_fft,
-        )
-    finally:
-        after_psd_raw.close()
-        before_psd_raw.close()
-        corrected_raw.close()
-        before_raw.close()
 
 
 def _channel_index(names: tuple[str, ...], channel_name: str) -> int:
@@ -302,6 +149,7 @@ def _measure_residual_quality(
     delay_seconds: float,
     window_seconds: tuple[float, float],
     maximum_ratio: float,
+    residual_floor_uv: float,
 ) -> BcgResidualQuality:
     locked_window = (
         delay_seconds + window_seconds[0],
@@ -334,16 +182,18 @@ def _measure_residual_quality(
         raise BcgInputError("BCG residual ratio has a zero before-correction RMS")
     after_median = float(np.median(after_rms))
     ratio = after_median / before_median
-    if ratio > maximum_ratio:
+    if ratio > maximum_ratio and after_median > residual_floor_uv:
         raise BcgInputError(
             f"BCG residual ratio {ratio:.3f} exceeds maximum "
-            f"{maximum_ratio:.3f}"
+            f"{maximum_ratio:.3f} with {after_median:.2f} uV still locked, "
+            f"above the {residual_floor_uv:.2f} uV floor"
         )
     return BcgResidualQuality(
         before_median_rms_uv=before_median,
         after_median_rms_uv=after_median,
         ratio=ratio,
         maximum_allowed_ratio=maximum_ratio,
+        residual_floor_uv=residual_floor_uv,
     )
 
 
@@ -385,11 +235,10 @@ def _write_provenance(
     correction: BcgCorrectionResult,
     sampling_rate_hz: float,
     gap_spans: tuple[tuple[int, int], ...],
+    gap_fraction: float,
     delay_scan: BcgDelayScan,
     residual_quality: BcgResidualQuality,
     output_paths: dict[str, Path],
-    psd_tmin: float,
-    psd_tmax: float,
 ) -> None:
     payload = {
         "input_vhdr": str(config.input_vhdr),
@@ -400,18 +249,15 @@ def _write_provenance(
         "ecg_to_bcg_delay_seconds": delay_scan.best_delay_seconds,
         "aas_neighbor_count": config.aas_neighbor_count,
         "pca_obs_components": config.pca_obs_components,
+        "cross_fit_fold_count": config.cross_fit_fold_count,
         "detector": asdict(config.detector),
         "peak_samples": detection.peak_samples.tolist(),
         "quality": asdict(detection.quality),
         "corrected_sample_count": int(correction.corrected_samples.size),
         "rr_gap_spans": [list(span) for span in gap_spans],
+        "rr_gap_fraction": gap_fraction,
+        "maximum_gap_fraction": config.maximum_gap_fraction,
         "residual_qc": asdict(residual_quality),
-        "psd_before": str(output_paths["psd_before"]),
-        "psd_after": str(output_paths["psd_after"]),
-        "psd_interval_seconds": {
-            "start": psd_tmin,
-            "end": psd_tmax,
-        },
         "delay_estimation": {
             "configured_delay_seconds": config.ecg_to_bcg_delay_seconds,
             "best_delay_seconds": delay_scan.best_delay_seconds,
@@ -424,3 +270,141 @@ def _write_provenance(
     with path.open("x", encoding="utf-8") as provenance_file:
         json.dump(payload, provenance_file, indent=2)
         provenance_file.write("\n")
+
+
+def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
+    """Detect independent R peaks and subtract BCG from EEG channels only."""
+    source = read_brainvision_recording(config.input_vhdr)
+    validate_fastr_marker_input(source.markers)
+    output_vhdr = config.output_vhdr.expanduser().resolve()
+    output_paths = _output_paths(output_vhdr)
+    _ensure_outputs_are_absent(output_paths)
+
+    raw = mne.io.read_raw_brainvision(
+        config.input_vhdr, preload=True, verbose="ERROR"
+    )
+    try:
+        names = tuple(raw.ch_names)
+        sampling_rate_hz = float(raw.info["sfreq"])
+        data = np.asarray(raw.get_data(), dtype=np.float64)
+    finally:
+        raw.close()
+
+    ecg_index = _channel_index(names, config.detector.ecg_channel)
+    eeg_picks = np.array(
+        [index for index in range(len(names)) if index != ecg_index],
+        dtype=np.int64,
+    )
+    detection = detect_r_peaks(
+        data[ecg_index],
+        sampling_rate_hz,
+        config=config.detector,
+    )
+    _require_usable_detection(detection)
+    rr_gaps = rr_gap_spans(
+        detection.peak_samples,
+        sampling_rate_hz,
+        config.detector.maximum_rr_seconds,
+    )
+    gap_fraction = _require_tolerable_gaps(
+        rr_gaps,
+        sample_count=data.shape[1],
+        maximum_gap_fraction=config.maximum_gap_fraction,
+    )
+    delay_scan = estimate_ecg_to_bcg_delay(
+        delay_estimation_eeg(
+            data,
+            names,
+            ecg_channel_index=ecg_index,
+        ),
+        detection.peak_samples,
+        sampling_rate_hz=sampling_rate_hz,
+    )
+    correction = correct_bcg(
+        data,
+        detection.peak_samples,
+        sampling_rate_hz,
+        channel_names=names,
+        eeg_picks=eeg_picks,
+        ecg_channel_index=ecg_index,
+        config=BcgCorrectionConfig(
+            method=config.method,
+            window_seconds=config.window_seconds,
+            ecg_to_bcg_delay_seconds=delay_scan.best_delay_seconds,
+            aas_neighbor_count=config.aas_neighbor_count,
+            pca_obs_components=config.pca_obs_components,
+            cross_fit_fold_count=config.cross_fit_fold_count,
+        ),
+    )
+    residual_quality = _measure_residual_quality(
+        data,
+        correction.data_volts,
+        names,
+        ecg_index=ecg_index,
+        peak_samples=detection.peak_samples,
+        sampling_rate_hz=sampling_rate_hz,
+        delay_seconds=delay_scan.best_delay_seconds,
+        window_seconds=config.window_seconds,
+        maximum_ratio=config.maximum_residual_ratio,
+        residual_floor_uv=config.residual_floor_uv,
+    )
+    markers = append_pulse_markers(
+        source.markers,
+        detection.peak_samples,
+        sample_count=data.shape[1],
+    ) + _bad_bcg_markers(rr_gaps, sample_count=data.shape[1])
+    write_brainvision_recording(
+        data=correction.data_volts,
+        sampling_rate=sampling_rate_hz,
+        channel_names=names,
+        output_vhdr=output_paths["vhdr"],
+        markers=markers,
+    )
+    _write_provenance(
+        output_paths["json"],
+        config=config,
+        detection=detection,
+        correction=correction,
+        sampling_rate_hz=sampling_rate_hz,
+        gap_spans=rr_gaps,
+        gap_fraction=gap_fraction,
+        delay_scan=delay_scan,
+        residual_quality=residual_quality,
+        output_paths=output_paths,
+    )
+    # Called after provenance on purpose: the page is a diagnostic, and a
+    # plotting failure must not cost the record of what was written.
+    profile = compute_correction_profile(
+        data,
+        correction.data_volts,
+        names,
+        ecg_channel_index=ecg_index,
+        peak_samples=detection.peak_samples,
+        sampling_rate_hz=sampling_rate_hz,
+        delay_seconds=delay_scan.best_delay_seconds,
+        window_seconds=config.window_seconds,
+        gap_fraction=gap_fraction,
+        method=config.method,
+        label=output_vhdr.stem,
+    )
+    if profile is not None:
+        save_correction_report(
+            profile,
+            title=(
+                f"{output_vhdr.stem}  \u2014  "
+                f"{config.method.upper()} correction report"
+            ),
+            output=output_paths["report"],
+        )
+        # The subject and cohort pages average these instead of re-reading EEG.
+        write_profile(profile, output_paths["profile"])
+    return BcgCorrectionSummary(
+        output_vhdr=output_paths["vhdr"],
+        provenance_json=output_paths["json"],
+        method=config.method,
+        marker_count=int(detection.peak_samples.size),
+        status=detection.quality.status,
+        applied_delay_seconds=delay_scan.best_delay_seconds,
+    )
+
+

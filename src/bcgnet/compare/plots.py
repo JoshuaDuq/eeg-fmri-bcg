@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import mne
 import numpy as np
 from scipy.signal import welch
@@ -13,22 +12,53 @@ from .arms import BCGNET, CLEAN_ARMS, COMPARATOR_ARMS
 from .pairs import RecordingSet
 from .qc import (
     alpha_peak_height,
-    load_detector_peaks,
+    load_shared_detector_provenance,
     median_locked_ratio,
     method_qc_flags,
+    removal_profile,
 )
 
 RAW_LABEL = "Raw"
-_RAW_STYLE = "C1-"
-_RAW_COLOR = "C1"
-# The BCG the network removed, shown as its own subplot rather than an arm.
-_PREDICTED_COLOR = "C4"
 
 _BANDS = {
     "delta": (0.5, 4.0),
     "theta": (4.0, 8.0),
     "alpha": (8.0, 13.0),
 }
+
+_PROFILE_METRICS = (
+    "specificity",
+    "alpha_collateral_fraction",
+    "locked_removed_uv",
+    "collateral_uv",
+)
+_FLAG_COLUMNS = (
+    "bcgnet_adds_power",
+    "bcgnet_locked_worse_than_raw",
+    "alpha_peak_collapsed",
+    "prefer_comparator",
+)
+
+
+def _metric_columns() -> tuple[str, ...]:
+    columns = ["bids_id", "stem", "label", "run"]
+    columns.extend(f"has_{arm.key}" for arm in CLEAN_ARMS)
+    columns.append("rms_raw")
+    for band in _BANDS:
+        columns.append(f"{band}_raw")
+        for arm in CLEAN_ARMS:
+            columns.extend((f"{band}_{arm.key}", f"{band}_{arm.key}_ratio"))
+    columns.append("alpha_peak_raw")
+    for arm in CLEAN_ARMS:
+        columns.extend((f"rms_{arm.key}", f"alpha_peak_{arm.key}"))
+    for arm in CLEAN_ARMS:
+        columns.append(f"locked_{arm.key}_ratio")
+        columns.extend(f"{name}_{arm.key}" for name in _PROFILE_METRICS)
+    columns.extend(_FLAG_COLUMNS)
+    return tuple(columns)
+
+
+METRIC_COLUMNS = _metric_columns()
 
 
 def load_fastr(path: Path) -> mne.io.BaseRaw:
@@ -55,119 +85,19 @@ def mean_eeg_psd(
     return freqs[keep], np.mean(pxx[:, keep], axis=0)
 
 
-def plot_psd(
-    traces: dict[str, mne.io.BaseRaw],
-    *,
-    title: str,
-    output: Path,
-    max_hz: float,
-) -> None:
-    plt.figure(figsize=(6, 6))
-    plt.title(title)
-    if RAW_LABEL in traces:
-        freqs, pxx = mean_eeg_psd(traces[RAW_LABEL], max_hz=max_hz)
-        plt.semilogy(freqs, pxx, _RAW_STYLE, label=RAW_LABEL)
-    for arm in CLEAN_ARMS:
-        if arm.label not in traces:
-            continue
-        freqs, pxx = mean_eeg_psd(traces[arm.label], max_hz=max_hz)
-        plt.semilogy(freqs, pxx, arm.style, label=arm.label)
-    plt.xlabel("Frequency (Hz)")
-    plt.ylabel(r"PSD ($\mu V^2/Hz)$")
-    plt.xlim(0, max_hz)
-    plt.legend(loc="upper right")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output, format="png")
-    plt.close()
-
-
-def plot_epoch(
-    traces: dict[str, mne.io.BaseRaw],
-    *,
-    channel: str,
-    start: float,
-    duration: float,
-    title: str,
-    output: Path,
-) -> None:
-    raw = traces[RAW_LABEL]
-    if channel not in raw.ch_names:
-        raise ValueError(f"channel {channel!r} is not in {raw.ch_names}")
-    fs = float(raw.info["sfreq"])
-    start_sample = int(start * fs)
-    stop_sample = start_sample + int(duration * fs)
-    if stop_sample > raw.n_times:
-        start_sample = 0
-        stop_sample = min(int(duration * fs), raw.n_times)
-    t = np.arange(stop_sample - start_sample) / fs
-    ch = raw.ch_names.index(channel)
-
-    x_max = float(t[-1]) * 1.05 if t.size else duration
-    plt.figure(figsize=(8, 10))
-    plt.suptitle(title, fontweight="bold")
-
-    plt.subplot(311)
-    plt.title("Original ECG")
-    if "ECG" in raw.ch_names:
-        ecg = raw.get_data(picks=["ECG"])[0, start_sample:stop_sample] * 1e6
-        plt.plot(t, ecg, "C0")
-    plt.xlabel("Time (s)")
-    plt.ylabel(r"Amplitude ($\mu$V)")
-    plt.xlim([0, x_max])
-
-    plt.subplot(312)
-    plt.title("BCGNet-predicted BCG")
-    raw_ch = raw.get_data()[ch, start_sample:stop_sample] * 1e6
-    if BCGNET.label in traces:
-        n = min(stop_sample, traces[BCGNET.label].n_times)
-        cleaned = traces[BCGNET.label].get_data()[ch, start_sample:n] * 1e6
-        predicted = raw_ch[: cleaned.size] - cleaned
-        plt.plot(t[: predicted.size], predicted, _PREDICTED_COLOR)
-    plt.xlabel("Time (s)")
-    plt.ylabel(r"Amplitude ($\mu$V)")
-    plt.xlim([0, x_max])
-
-    plt.subplot(313)
-    plt.title("Raw and Cleaned Data")
-    plt.plot(t, raw_ch, _RAW_COLOR, label=RAW_LABEL)
-    for arm in CLEAN_ARMS:
-        if arm.label not in traces:
-            continue
-        n = min(stop_sample, traces[arm.label].n_times)
-        if n > start_sample:
-            plt.plot(
-                t[: n - start_sample],
-                traces[arm.label].get_data()[ch, start_sample:n] * 1e6,
-                arm.color,
-                label=arm.label,
-            )
-    plt.xlabel("Time (s)")
-    plt.ylabel(r"Amplitude ($\mu$V)")
-    plt.xlim([0, x_max])
-    plt.legend(loc="upper right", frameon=False)
-    # Same spacing as the vendor epoch figures.
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.90)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output, format="png")
-    plt.close()
-
-
 def band_power(freqs: np.ndarray, pxx: np.ndarray, low: float, high: float) -> float:
     mask = (freqs >= low) & (freqs <= high)
     return float(np.sum(pxx[mask]))
 
 
-def _detector_peaks(recording: RecordingSet) -> tuple[np.ndarray, float] | None:
-    """R train for locked residuals, from whichever bounded arm produced one."""
-    for arm in COMPARATOR_ARMS:
-        vhdr = recording.cleaned_vhdr.get(arm.key)
-        if vhdr is None:
-            continue
-        peaks = load_detector_peaks(vhdr)
-        if peaks is not None:
-            return peaks
-    return None
+def detector_provenance(recording: RecordingSet):
+    return load_shared_detector_provenance(
+        {
+            arm.key: recording.cleaned_vhdr[arm.key]
+            for arm in COMPARATOR_ARMS
+            if arm.key in recording.cleaned_vhdr
+        }
+    )
 
 
 def metrics_row(
@@ -175,13 +105,7 @@ def metrics_row(
     traces: dict[str, mne.io.BaseRaw],
     *,
     max_hz: float,
-    window_seconds: tuple[float, float] = (-0.2, 0.7),
 ) -> dict[str, object]:
-    """One row of ``compare_summary.csv``.
-
-    Every arm contributes the same columns whether or not it ran, so the summary
-    stays a single rectangular table across a cohort with uneven coverage.
-    """
     row: dict[str, object] = {
         "bids_id": recording.bids_id,
         "stem": recording.stem,
@@ -230,19 +154,34 @@ def metrics_row(
         if arm is BCGNET:
             alpha_net = peak
 
-    peaks = _detector_peaks(recording)
+    provenance = detector_provenance(recording)
     for arm in CLEAN_ARMS:
         ratio = None
-        if peaks is not None and arm.label in traces:
-            peak_samples, delay = peaks
+        if provenance is not None and arm.label in traces:
             ratio = median_locked_ratio(
                 traces[RAW_LABEL],
                 traces[arm.label],
-                peak_samples=peak_samples,
-                delay_seconds=delay,
-                window_seconds=window_seconds,
+                peak_samples=provenance.peak_samples,
+                delay_seconds=provenance.delay_seconds,
+                window_seconds=provenance.window_seconds,
             )
         row[f"locked_{arm.key}_ratio"] = ratio
+        profile: dict[str, float | None] = {
+            "specificity": None,
+            "alpha_collateral_fraction": None,
+            "locked_removed_uv": None,
+            "collateral_uv": None,
+        }
+        if provenance is not None and arm.label in traces:
+            profile = removal_profile(
+                traces[RAW_LABEL],
+                traces[arm.label],
+                peak_samples=provenance.peak_samples,
+                delay_seconds=provenance.delay_seconds,
+                window_seconds=provenance.window_seconds,
+            )
+        for name, value in profile.items():
+            row[f"{name}_{arm.key}"] = value
 
     row.update(
         method_qc_flags(
@@ -252,4 +191,6 @@ def metrics_row(
             alpha_peak_bcgnet=alpha_net,
         )
     )
+    if tuple(row) != METRIC_COLUMNS:
+        raise RuntimeError("comparison metric row does not match its declared schema")
     return row

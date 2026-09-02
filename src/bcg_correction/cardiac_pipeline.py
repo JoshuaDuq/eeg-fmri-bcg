@@ -19,42 +19,6 @@ from .cardiac_markers import (
 )
 
 
-def run_cardiac_detection(config: DetectionRunConfig) -> DetectionSummary:
-    """Derive ECG R markers and write a provenance-bearing BrainVision copy."""
-    source = read_brainvision_recording(config.input_vhdr)
-    validate_fastr_marker_input(source.markers)
-    output_vhdr = config.output_vhdr.expanduser().resolve()
-    provenance_json = output_vhdr.with_suffix(".cardiac.json")
-    _ensure_outputs_are_absent(output_vhdr, provenance_json)
-
-    ecg, sampling_rate_hz = _read_ecg(
-        config.input_vhdr,
-        channel_name=config.detector.ecg_channel,
-    )
-    detection = detect_r_peaks(
-        ecg,
-        sampling_rate_hz,
-        config=config.detector,
-    )
-    write_marker_recording(
-        config.input_vhdr,
-        output_vhdr,
-        peak_samples=detection.peak_samples,
-    )
-    _write_provenance(
-        provenance_json,
-        config=config,
-        detection=detection,
-        sampling_rate_hz=sampling_rate_hz,
-    )
-    return DetectionSummary(
-        output_vhdr=output_vhdr,
-        provenance_json=provenance_json,
-        marker_count=int(detection.peak_samples.size),
-        status=detection.quality.status,
-    )
-
-
 def _read_ecg(
     vhdr_path: Path,
     *,
@@ -113,3 +77,38 @@ def _write_provenance(
     with path.open("x", encoding="utf-8") as provenance_file:
         json.dump(payload, provenance_file, indent=2)
         provenance_file.write("\n")
+
+
+def run_cardiac_detection(config: DetectionRunConfig) -> DetectionSummary:
+    source = read_brainvision_recording(config.input_vhdr)
+    validate_fastr_marker_input(source.markers)
+    output_vhdr = config.output_vhdr.expanduser().resolve()
+    provenance_json = output_vhdr.with_suffix(".cardiac.json")
+    _ensure_outputs_are_absent(output_vhdr, provenance_json)
+
+    ecg, sampling_rate_hz = _read_ecg(
+        config.input_vhdr,
+        channel_name=config.detector.ecg_channel,
+    )
+    detection = detect_r_peaks(
+        ecg,
+        sampling_rate_hz,
+        config=config.detector,
+    )
+    write_marker_recording(
+        config.input_vhdr,
+        output_vhdr,
+        peak_samples=detection.peak_samples,
+    )
+    _write_provenance(
+        provenance_json,
+        config=config,
+        detection=detection,
+        sampling_rate_hz=sampling_rate_hz,
+    )
+    return DetectionSummary(
+        output_vhdr=output_vhdr,
+        provenance_json=provenance_json,
+        marker_count=int(detection.peak_samples.size),
+        status=detection.quality.status,
+    )

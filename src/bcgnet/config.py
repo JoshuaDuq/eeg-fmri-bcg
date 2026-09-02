@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from .discovery import DEFAULT_RUN_PATTERN
+from bcgstudy.discovery import DEFAULT_RUN_PATTERN
 
 
 class ConfigurationError(ValueError):
@@ -26,12 +26,6 @@ class PathConfig:
 
 @dataclass(frozen=True, slots=True)
 class ComputeConfig:
-    """How the cohort is spread over this machine.
-
-    :param device: ``"cpu"``, ``"gpu"``, or ``"gpu:<index>"`` to pick a card on
-        a multi-GPU host. Training is CPU-only unless this says otherwise.
-    """
-
     workers: int
     cpu_count: int
     threads_per_worker: int
@@ -43,10 +37,6 @@ class ComputeConfig:
 
     @property
     def cuda_visible_devices(self) -> str:
-        """What ``CUDA_VISIBLE_DEVICES`` must be for this device.
-
-        ``-1`` hides every card, which is what keeps a CPU run on the CPU.
-        """
         if not self.use_gpu:
             return "-1"
         _, _, index = self.device.partition(":")
@@ -87,12 +77,6 @@ class SubjectConfig:
 
 @dataclass(frozen=True, slots=True)
 class NamingConfig:
-    """How recording filenames are read.
-
-    :param run_pattern: regex whose first group is the run number. A recording
-        whose filename does not match is not part of the numbered series.
-    """
-
     run_pattern: str
 
 
@@ -146,90 +130,6 @@ _PREPROCESS_KEYS = frozenset(
 _SUBJECT_KEYS = frozenset({"include", "exclude"})
 _NAMING_KEYS = frozenset({"run_pattern"})
 
-
-def load_config(path: str | Path) -> BCGNetConfig:
-    config_path = Path(path).expanduser().resolve()
-    try:
-        document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise ConfigurationError(
-            f"configuration file does not exist: {config_path}"
-        ) from error
-    except yaml.YAMLError as error:
-        raise ConfigurationError(
-            f"invalid YAML in configuration: {config_path}"
-        ) from error
-
-    root = _mapping(document, "configuration")
-    _reject_unknown(root, _TOP, "configuration")
-    _require(root, _TOP - _OPTIONAL_TOP, "configuration")
-    base = config_path.parent
-
-    paths = _section(root, "paths", _PATH_KEYS)
-    compute = _section(root, "compute", _COMPUTE_KEYS)
-    training = _section(root, "training", _TRAINING_KEYS)
-    preprocess = _section(root, "preprocess", _PREPROCESS_KEYS)
-    subjects = _section(root, "subjects", _SUBJECT_KEYS)
-    naming = _section(root, "naming", _NAMING_KEYS)
-
-    workers = _integer(compute, "workers", minimum=1)
-    cpu_count = _integer(compute, "cpu_count", minimum=1)
-    threads = compute.get("threads_per_worker")
-    if threads is None or threads == "auto":
-        threads_per_worker = max(1, cpu_count // workers)
-    else:
-        threads_per_worker = _integer(compute, "threads_per_worker", minimum=1)
-
-    per_training = _fraction(preprocess, "per_training")
-    per_valid = _fraction(preprocess, "per_valid")
-    per_test = _fraction(preprocess, "per_test")
-    split_sum = per_training + per_valid + per_test
-    if abs(split_sum - 1.0) > 1e-9:
-        raise ConfigurationError(
-            "preprocess.per_training, per_valid, and per_test must sum to 1"
-        )
-    if workers > cpu_count:
-        raise ConfigurationError("compute.workers cannot exceed compute.cpu_count")
-
-    return BCGNetConfig(
-        paths=PathConfig(
-            fastr_root=_path_value(paths, "fastr_root", base),
-            output_root=_path_value(paths, "output_root", base),
-        ),
-        compute=ComputeConfig(
-            workers=workers,
-            cpu_count=cpu_count,
-            threads_per_worker=threads_per_worker,
-            device=_device(compute),
-        ),
-        training=TrainingConfig(
-            num_epochs=_integer(training, "num_epochs", minimum=1),
-            es_patience=_integer(training, "es_patience", minimum=1),
-            batch_size=_integer(training, "batch_size", minimum=1),
-            learning_rate=_positive_number(training, "learning_rate"),
-            random_seed=_integer(training, "random_seed", minimum=0),
-            architecture=_string(training, "architecture"),
-            overwrite=_bool(training, "overwrite"),
-            resume=_bool(training, "resume"),
-            save_model=_bool(training, "save_model"),
-            save_data=_bool(training, "save_data"),
-            save_figures=_bool(training, "save_figures"),
-        ),
-        preprocess=PreprocessConfig(
-            new_fs=_integer(preprocess, "new_fs", minimum=1),
-            len_epoch=_positive_number(preprocess, "len_epoch"),
-            mad_threshold=_positive_number(preprocess, "mad_threshold"),
-            per_training=per_training,
-            per_valid=per_valid,
-            per_test=per_test,
-            ecg_channel=_string(preprocess, "ecg_channel"),
-        ),
-        subjects=SubjectConfig(
-            include=_string_list(subjects, "include"),
-            exclude=_string_list(subjects, "exclude"),
-        ),
-        naming=NamingConfig(run_pattern=run_pattern(naming)),
-    )
 
 
 def run_pattern(naming: Mapping[str, object]) -> str:
@@ -380,3 +280,88 @@ def _string_list(values: Mapping[str, object], name: str) -> tuple[str, ...]:
     if any(not isinstance(item, str) or not item for item in value):
         raise ConfigurationError(f"{name} must be a list of nonempty strings")
     return tuple(value)
+
+
+def load_config(path: str | Path) -> BCGNetConfig:
+    config_path = Path(path).expanduser().resolve()
+    try:
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ConfigurationError(
+            f"configuration file does not exist: {config_path}"
+        ) from error
+    except yaml.YAMLError as error:
+        raise ConfigurationError(
+            f"invalid YAML in configuration: {config_path}"
+        ) from error
+
+    root = _mapping(document, "configuration")
+    _reject_unknown(root, _TOP, "configuration")
+    _require(root, _TOP - _OPTIONAL_TOP, "configuration")
+    base = config_path.parent
+
+    paths = _section(root, "paths", _PATH_KEYS)
+    compute = _section(root, "compute", _COMPUTE_KEYS)
+    training = _section(root, "training", _TRAINING_KEYS)
+    preprocess = _section(root, "preprocess", _PREPROCESS_KEYS)
+    subjects = _section(root, "subjects", _SUBJECT_KEYS)
+    naming = _section(root, "naming", _NAMING_KEYS)
+
+    workers = _integer(compute, "workers", minimum=1)
+    cpu_count = _integer(compute, "cpu_count", minimum=1)
+    threads = compute.get("threads_per_worker")
+    if threads is None or threads == "auto":
+        threads_per_worker = max(1, cpu_count // workers)
+    else:
+        threads_per_worker = _integer(compute, "threads_per_worker", minimum=1)
+
+    per_training = _fraction(preprocess, "per_training")
+    per_valid = _fraction(preprocess, "per_valid")
+    per_test = _fraction(preprocess, "per_test")
+    split_sum = per_training + per_valid + per_test
+    if abs(split_sum - 1.0) > 1e-9:
+        raise ConfigurationError(
+            "preprocess.per_training, per_valid, and per_test must sum to 1"
+        )
+    if workers > cpu_count:
+        raise ConfigurationError("compute.workers cannot exceed compute.cpu_count")
+
+    return BCGNetConfig(
+        paths=PathConfig(
+            fastr_root=_path_value(paths, "fastr_root", base),
+            output_root=_path_value(paths, "output_root", base),
+        ),
+        compute=ComputeConfig(
+            workers=workers,
+            cpu_count=cpu_count,
+            threads_per_worker=threads_per_worker,
+            device=_device(compute),
+        ),
+        training=TrainingConfig(
+            num_epochs=_integer(training, "num_epochs", minimum=1),
+            es_patience=_integer(training, "es_patience", minimum=1),
+            batch_size=_integer(training, "batch_size", minimum=1),
+            learning_rate=_positive_number(training, "learning_rate"),
+            random_seed=_integer(training, "random_seed", minimum=0),
+            architecture=_string(training, "architecture"),
+            overwrite=_bool(training, "overwrite"),
+            resume=_bool(training, "resume"),
+            save_model=_bool(training, "save_model"),
+            save_data=_bool(training, "save_data"),
+            save_figures=_bool(training, "save_figures"),
+        ),
+        preprocess=PreprocessConfig(
+            new_fs=_integer(preprocess, "new_fs", minimum=1),
+            len_epoch=_positive_number(preprocess, "len_epoch"),
+            mad_threshold=_positive_number(preprocess, "mad_threshold"),
+            per_training=per_training,
+            per_valid=per_valid,
+            per_test=per_test,
+            ecg_channel=_string(preprocess, "ecg_channel"),
+        ),
+        subjects=SubjectConfig(
+            include=_string_list(subjects, "include"),
+            exclude=_string_list(subjects, "exclude"),
+        ),
+        naming=NamingConfig(run_pattern=run_pattern(naming)),
+    )

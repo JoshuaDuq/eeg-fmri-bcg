@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bcgnet.discovery import (
+from bcgstudy.discovery import (
     DEFAULT_RUN_PATTERN,
     Recording,
     iter_subjects,

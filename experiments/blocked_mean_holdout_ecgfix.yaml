@@ -1,0 +1,35 @@
+# Held-out cohort validation, re-run after the 2026-09-01 ECG-projection fix.
+# Same 28 recordings as blocked_mean_holdout.yaml so the two are comparable;
+# the corrections are recomputed in memory, so this measures the fixed method.
+compare_config: ../compare_rerun.yaml
+output_root: ../results/blocked_mean_holdout_20260901_ecgfix
+cross_fit_fold_count: 10
+recordings:
+  - {subject: sub-0001, label: BaselineEEG}
+  - {subject: sub-0001, label: run3}
+  - {subject: sub-0003, label: BaselineEEG}
+  - {subject: sub-0005, label: BaselineEEG}
+  - {subject: sub-0005, label: run3}
+  - {subject: sub-0006, label: BaselineEEG}
+  - {subject: sub-0006, label: run3}
+  - {subject: sub-0007, label: run3}
+  - {subject: sub-0009, label: BaselineEEG}
+  - {subject: sub-0009, label: run3}
+  - {subject: sub-0010, label: BaselineEEG}
+  - {subject: sub-0010, label: run3}
+  - {subject: sub-0011, label: BaselineEEG}
+  - {subject: sub-0011, label: run3}
+  - {subject: sub-0013, label: BaselineEEG}
+  - {subject: sub-0013, label: run3}
+  - {subject: sub-0014, label: BaselineEEG}
+  - {subject: sub-0014, label: run3}
+  - {subject: sub-0015, label: BaselineEEG}
+  - {subject: sub-0015, label: run3}
+  - {subject: sub-0017, label: BaselineEEG}
+  - {subject: sub-0017, label: run3}
+  - {subject: sub-0018, label: BaselineEEG}
+  - {subject: sub-0018, label: run3}
+  - {subject: sub-0019, label: BaselineEEG}
+  - {subject: sub-0019, label: run3}
+  - {subject: sub-0021, label: BaselineEEG}
+  - {subject: sub-0021, label: run3}

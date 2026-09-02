@@ -40,13 +40,7 @@ def resolve_output_window(
     mode: str,
     input_sample_count: int,
 ) -> OutputWindow:
-    """Resolve the emitted span for one trim mode.
-
-    ``first_to_last_volume`` reproduces the trim these recordings were prepared
-    with externally: the first volume marker through the last one, inclusive.
-    Correction still runs over the whole recording, so the volumes at either end
-    of this span keep the neighbours and the complete epochs they need.
-    """
+    """Resolve the emitted span for one trim mode."""
     if isinstance(input_sample_count, bool) or not isinstance(
         input_sample_count, int
     ):
