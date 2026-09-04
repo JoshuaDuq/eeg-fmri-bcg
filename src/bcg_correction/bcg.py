@@ -12,17 +12,11 @@ import mne
 import numpy as np
 import numpy.typing as npt
 
-from bcg_correction.adaptive import (
-    apply_template_predictions_to_recording,
-    contiguous_cross_fit_training_mask,
-    predict_cross_fitted_reference_scaled_mean_templates,
-)
-
 _AAS_NEIGHBOR_POOL_FACTOR = 3
 _AAS_TAPER_FRACTION = 0.05
 
 #: Every bounded method ``correct_bcg`` can apply.
-METHODS = frozenset({"aas", "pca_obs", "blocked_mean"})
+METHODS = frozenset({"aas", "pca_obs"})
 
 
 class BcgInputError(ValueError):
@@ -38,11 +32,6 @@ class BcgCorrectionConfig:
     ecg_to_bcg_delay_seconds: float
     aas_neighbor_count: int
     pca_obs_components: int
-    #: Contiguous held-out blocks used by ``blocked_mean``. Every method
-    #: validates it, because a config that silently carries a nonsense value
-    #: for the arm it is not currently running is a config that will produce a
-    #: nonsense correction the first time the method changes.
-    cross_fit_fold_count: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.method, str) or self.method not in METHODS:
@@ -86,14 +75,6 @@ class BcgCorrectionConfig:
         ):
             raise BcgInputError(
                 "pca_obs_components must be a positive integer"
-            )
-        if (
-            isinstance(self.cross_fit_fold_count, bool)
-            or not isinstance(self.cross_fit_fold_count, Integral)
-            or self.cross_fit_fold_count < 2
-        ):
-            raise BcgInputError(
-                "cross_fit_fold_count must be an integer of at least two"
             )
 
 
@@ -271,53 +252,6 @@ def _window_union(
     for start, stop in bounds:
         coverage[start:stop] = True
     return np.flatnonzero(coverage).astype(np.int64, copy=False)
-
-
-def _correct_blocked_mean(
-    data: np.ndarray,
-    eeg_indices: np.ndarray,
-    ecg_index: int,
-    window_bounds: tuple[tuple[int, int], ...],
-    fold_count: int,
-) -> np.ndarray:
-    """Subtract a mean template estimated without the target beat's own EEG.
-
-    Beats are split into contiguous folds. For each fold, one scalar per channel
-    regresses the ECG channel out of the beats *outside* the fold, and the mean
-    of what is left is the BCG template. A beat is then corrected by that
-    template plus the same scalars applied to its own ECG epoch, which takes the
-    volume-conducted cardiac field out with the BCG. Neither the regression nor
-    the template can see EEG that the same call will later subtract from, so
-    idiosyncratic activity in one beat cannot cause more to be taken out of that
-    same beat -- the leakage that target-fitted methods are exposed to. The ECG
-    channel is never corrected, so reading the target's ECG is not leakage.
-    """
-    if len(window_bounds) < fold_count:
-        raise BcgInputError(
-            f"blocked_mean needs at least cross_fit_fold_count ({fold_count}) "
-            f"complete windows; {len(window_bounds)} remain"
-        )
-    starts = np.asarray([start for start, _stop in window_bounds], dtype=np.int64)
-    epoch_samples = window_bounds[0][1] - window_bounds[0][0]
-    epoch_indices = starts[:, np.newaxis] + np.arange(epoch_samples)
-    eeg = data[eeg_indices]
-
-    templates = predict_cross_fitted_reference_scaled_mean_templates(
-        eeg[:, epoch_indices].transpose(1, 0, 2),
-        data[ecg_index][epoch_indices],
-        contiguous_cross_fit_training_mask(
-            starts,
-            epoch_samples=epoch_samples,
-            fold_count=fold_count,
-        ),
-    )
-    corrected = data.copy()
-    corrected[eeg_indices] = apply_template_predictions_to_recording(
-        eeg,
-        starts,
-        templates,
-    )
-    return corrected
 
 
 def _correct_aas(
@@ -649,14 +583,6 @@ def correct_bcg(
             window_bounds,
             anchor_samples,
             config.aas_neighbor_count,
-        )
-    elif config.method == "blocked_mean":
-        corrected = _correct_blocked_mean(
-            data,
-            eeg_indices,
-            ecg_index,
-            window_bounds,
-            config.cross_fit_fold_count,
         )
     else:
         corrected = _correct_pca_obs(

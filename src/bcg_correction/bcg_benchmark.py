@@ -310,7 +310,6 @@ def _benchmark_pair(pair: RecordingPair, config: BenchmarkConfig) -> dict[str, o
             ecg_to_bcg_delay_seconds=applied_delay,
             aas_neighbor_count=config.aas_neighbor_count,
             pca_obs_components=config.pca_obs_components,
-            cross_fit_fold_count=config.cross_fit_fold_count,
         )
         result = correct_bcg(
             fastr_data,

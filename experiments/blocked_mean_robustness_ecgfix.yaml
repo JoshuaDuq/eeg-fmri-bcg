@@ -1,7 +1,0 @@
-compare_config: ../compare_rerun.yaml
-holdout_metrics: ../results/blocked_mean_holdout_20260901_ecgfix/holdout_metrics.csv
-output_root: ../results/blocked_mean_robustness_20260901_ecgfix
-cross_fit_fold_counts: [2, 5, 10, 20]
-injection_amplitude_uv: 5.0
-event_count: 120
-seed: 20260901

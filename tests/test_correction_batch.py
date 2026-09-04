@@ -16,6 +16,7 @@ from bcg_correction.brainvision import (
     BrainVisionMarker,
     write_brainvision_markers,
 )
+from bcg_correction.evaluation import EvaluationSettings
 from bcgnet.compare.arms import AAS
 from bcgstudy.correction_batch import (
     CorrectionSettings,
@@ -42,9 +43,7 @@ _SETTINGS = CorrectionSettings(
     ecg_to_bcg_delay_seconds=0.21,
     aas_neighbor_count=2,
     pca_obs_components=1,
-    cross_fit_fold_count=2,
-    maximum_residual_ratio=0.75,
-    residual_floor_uv=0.0,
+    evaluation=EvaluationSettings((2, 5, 10, 20), 8),
     maximum_gap_fraction=0.05,
     overwrite=False,
     detector=_DETECTOR,

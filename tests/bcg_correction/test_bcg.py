@@ -38,11 +38,10 @@ def correction_config(method: str) -> BcgCorrectionConfig:
         ecg_to_bcg_delay_seconds=0.2,
         aas_neighbor_count=2,
         pca_obs_components=1,
-        cross_fit_fold_count=2,
     )
 
 
-@pytest.mark.parametrize("method", ["aas", "pca_obs", "blocked_mean"])
+@pytest.mark.parametrize("method", ["aas", "pca_obs"])
 def test_correction_reduces_heartbeat_locked_artifact_and_preserves_boundaries(
     method: str,
 ) -> None:
@@ -312,7 +311,6 @@ def test_aas_rejects_a_window_shorter_than_two_samples() -> None:
                 ecg_to_bcg_delay_seconds=0.0,
                 aas_neighbor_count=2,
                 pca_obs_components=1,
-                cross_fit_fold_count=2,
             ),
         )
 
@@ -333,7 +331,6 @@ def test_pca_obs_requires_effective_component_support() -> None:
                 ecg_to_bcg_delay_seconds=0.2,
                 aas_neighbor_count=2,
                 pca_obs_components=2,
-                cross_fit_fold_count=2,
             ),
         )
 
@@ -356,91 +353,7 @@ def test_rr_gap_spans_keep_successive_gaps_separate() -> None:
     assert rr_gap_spans(peaks, 1_000.0, 1.5) == ((1000, 4000), (4000, 7000))
 
 
-def test_blocked_mean_removes_the_artifact_and_leaves_the_ecg_alone() -> None:
-    """The third bounded method has to satisfy the same contract as the others."""
-    data, clean, sampling_rate_hz, peak_samples = make_recording()
-    result = correct_bcg(
-        data,
-        peak_samples,
-        sampling_rate_hz,
-        channel_names=["EEG 001", "EEG 002", "ECG"],
-        eeg_picks=np.array([0, 1], dtype=np.int64),
-        ecg_channel_index=2,
-        config=correction_config("blocked_mean"),
-    )
-    assert result.method == "blocked_mean"
-    assert np.array_equal(result.data_volts[2], data[2])
-    before = np.abs(data[:2] - clean[:2]).mean()
-    after = np.abs(result.data_volts[:2] - clean[:2]).mean()
-    assert after < before
-
-
-def test_blocked_mean_never_reads_the_beat_it_is_correcting() -> None:
-    """Leakage check: a spike in one beat must not change that beat's template.
-
-    Corrupting a single beat may change what is subtracted from *other* beats
-    once it enters their training folds, but it must never change what is
-    subtracted from itself -- that is the property target-fitted methods lack.
-    """
-    data, _clean, sampling_rate_hz, peak_samples = make_recording()
-    config = correction_config("blocked_mean")
-    common = dict(
-        channel_names=["EEG 001", "EEG 002", "ECG"],
-        eeg_picks=np.array([0, 1], dtype=np.int64),
-        ecg_channel_index=2,
-        config=config,
-    )
-    baseline = correct_bcg(data, peak_samples, sampling_rate_hz, **common)
-
-    target = int(peak_samples[len(peak_samples) // 2])
-    spiked = data.copy()
-    spiked[0, target + 40:target + 60] += 500e-6
-    perturbed = correct_bcg(spiked, peak_samples, sampling_rate_hz, **common)
-
-    removed_baseline = data - baseline.data_volts
-    removed_perturbed = spiked - perturbed.data_volts
-    window = slice(target + 40, target + 60)
-    assert np.allclose(
-        removed_baseline[0, window], removed_perturbed[0, window], atol=1e-12
-    )
-
-
-def test_blocked_mean_refuses_fewer_windows_than_folds() -> None:
-    data, _clean, sampling_rate_hz, peak_samples = make_recording()
-    config = BcgCorrectionConfig(
-        method="blocked_mean",
-        window_seconds=(-0.1, 0.2),
-        ecg_to_bcg_delay_seconds=0.2,
-        aas_neighbor_count=2,
-        pca_obs_components=1,
-        cross_fit_fold_count=len(peak_samples) + 5,
-    )
-    with pytest.raises(BcgInputError, match="cross_fit_fold_count"):
-        correct_bcg(
-            data,
-            peak_samples,
-            sampling_rate_hz,
-            channel_names=["EEG 001", "EEG 002", "ECG"],
-            eeg_picks=np.array([0, 1], dtype=np.int64),
-            ecg_channel_index=2,
-            config=config,
-        )
-
-
-def test_cross_fit_fold_count_must_be_at_least_two() -> None:
-    for value in (1, 0, -1, True, 2.5):
-        with pytest.raises(BcgInputError, match="cross_fit_fold_count"):
-            BcgCorrectionConfig(
-                method="blocked_mean",
-                window_seconds=(-0.1, 0.2),
-                ecg_to_bcg_delay_seconds=0.2,
-                aas_neighbor_count=2,
-                pca_obs_components=1,
-                cross_fit_fold_count=value,
-            )
-
-
-@pytest.mark.parametrize("method", ["aas", "pca_obs", "blocked_mean"])
+@pytest.mark.parametrize("method", ["aas", "pca_obs"])
 def test_correction_leaves_no_step_at_a_window_boundary(method: str) -> None:
     """Every arm's estimate must taper to zero where its window ends.
 
@@ -472,7 +385,7 @@ def test_correction_leaves_no_step_at_a_window_boundary(method: str) -> None:
     assert steps.max() <= uncorrected.max() * 1.5 + 1e-9
 
 
-@pytest.mark.parametrize("method", ["aas", "pca_obs", "blocked_mean"])
+@pytest.mark.parametrize("method", ["aas", "pca_obs"])
 def test_correction_never_touches_a_sample_outside_a_window(method: str) -> None:
     data, _clean, sampling_rate_hz, peak_samples = make_recording()
     result = correct_bcg(
@@ -489,109 +402,3 @@ def test_correction_never_touches_a_sample_outside_a_window(method: str) -> None
     assert np.array_equal(
         result.data_volts[:2][:, outside], data[:2][:, outside]
     )
-
-
-def make_recording_with_ecg_projection() -> tuple[
-    np.ndarray, np.ndarray, float, np.ndarray
-]:
-    """The recording above, plus a volume-conducted copy of the ECG in the EEG.
-
-    In the scanner every EEG electrode sees a small scaled copy of the cardiac
-    field. It is heartbeat-locked and it is an artifact, so a correction that
-    leaves it in the output has not removed the cardiac artifact.
-    """
-    data, clean, sampling_rate_hz, peak_samples = make_recording()
-    samples = np.arange(data.shape[1], dtype=float)
-    ecg = np.zeros(data.shape[1])
-    for peak in peak_samples:
-        ecg += 1e-3 * np.exp(-0.5 * ((samples - peak) / 6.0) ** 2)
-    data[2] = ecg
-    data[0] += 0.02 * ecg
-    data[1] += -0.01 * ecg
-    return data, clean, sampling_rate_hz, peak_samples
-
-
-def test_blocked_mean_removes_the_volume_conducted_ecg_projection() -> None:
-    """The ECG projection has to leave the output, not just the template.
-
-    Regressing the ECG out of the *training* beats and then subtracting that
-    ECG-free template leaves every target beat's own ECG projection in the
-    written EEG. The report metrics regress the ECG out before measuring, so
-    they cannot see it; this test measures the file as written.
-    """
-    data, clean, sampling_rate_hz, peak_samples = make_recording_with_ecg_projection()
-    # A window that reaches back over the R peak, as the study window does.
-    config = BcgCorrectionConfig(
-        method="blocked_mean",
-        window_seconds=(-0.3, 0.2),
-        ecg_to_bcg_delay_seconds=0.2,
-        aas_neighbor_count=2,
-        pca_obs_components=1,
-        cross_fit_fold_count=2,
-    )
-    result = correct_bcg(
-        data,
-        peak_samples,
-        sampling_rate_hz,
-        channel_names=["EEG 001", "EEG 002", "ECG"],
-        eeg_picks=np.array([0, 1], dtype=np.int64),
-        ecg_channel_index=2,
-        config=config,
-    )
-    # Around each R peak, the projection is 20 uV and the BCG template is ~0.
-    qrs = np.concatenate(
-        [np.arange(peak - 10, peak + 11) for peak in peak_samples[1:-1]]
-    )
-    before = np.abs(data[0, qrs] - clean[0, qrs]).max()
-    after = np.abs(result.data_volts[0, qrs] - clean[0, qrs]).max()
-    assert before > 15e-6
-    assert after < 0.15 * before
-
-
-def test_blocked_mean_still_never_reads_the_beat_it_is_correcting_with_ecg() -> None:
-    """Using the target's own ECG channel is not leakage: ECG is not corrected."""
-    data, _clean, sampling_rate_hz, peak_samples = make_recording_with_ecg_projection()
-    common = dict(
-        channel_names=["EEG 001", "EEG 002", "ECG"],
-        eeg_picks=np.array([0, 1], dtype=np.int64),
-        ecg_channel_index=2,
-        config=correction_config("blocked_mean"),
-    )
-    baseline = correct_bcg(data, peak_samples, sampling_rate_hz, **common)
-    target = int(peak_samples[len(peak_samples) // 2])
-    spiked = data.copy()
-    spiked[0, target + 40:target + 60] += 500e-6
-    perturbed = correct_bcg(spiked, peak_samples, sampling_rate_hz, **common)
-    window = slice(target + 40, target + 60)
-    assert np.allclose(
-        (data - baseline.data_volts)[0, window],
-        (spiked - perturbed.data_volts)[0, window],
-        atol=1e-12,
-    )
-
-
-def test_blocked_mean_matches_the_adaptive_reference_implementation() -> None:
-    """Two entry points, one method: the tools must not drift from ``bcg``."""
-    from bcg_correction.adaptive import correct_cross_fitted_reference_mean
-
-    data, _clean, sampling_rate_hz, peak_samples = make_recording_with_ecg_projection()
-    config = correction_config("blocked_mean")
-    via_bcg = correct_bcg(
-        data,
-        peak_samples,
-        sampling_rate_hz,
-        channel_names=["EEG 001", "EEG 002", "ECG"],
-        eeg_picks=np.array([0, 1], dtype=np.int64),
-        ecg_channel_index=2,
-        config=config,
-    ).data_volts
-    via_adaptive = correct_cross_fitted_reference_mean(
-        data,
-        ecg_channel_index=2,
-        peak_samples=peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        delay_seconds=config.ecg_to_bcg_delay_seconds,
-        window_seconds=config.window_seconds,
-        fold_count=config.cross_fit_fold_count,
-    )
-    np.testing.assert_allclose(via_adaptive, via_bcg, atol=1e-15)

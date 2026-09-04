@@ -18,8 +18,6 @@ from .brainvision import (
     read_brainvision_markers,
     write_brainvision_markers,
 )
-from .markers import map_brainvision_position
-from .window import OutputWindow
 
 
 class BrainVisionInputError(ValueError):
@@ -167,42 +165,6 @@ def select_marker_samples(
             "configured markers must be in strictly increasing file order"
         )
     return positions
-
-
-def resample_markers(
-    markers: Iterable[BrainVisionMarker],
-    *,
-    factor: int,
-    window: OutputWindow | None = None,
-) -> tuple[BrainVisionMarker, ...]:
-    """Map marker positions through an output window and integer decimation.
-
-    Marker positions are one-based; ``window`` bounds are zero-based and
-    half-open. Markers outside the window are dropped rather than clamped, so a
-    corrected recording never claims an event it does not contain.
-    """
-    if isinstance(factor, bool) or not isinstance(factor, int) or factor < 1:
-        raise BrainVisionInputError("resampling factor must be a positive integer")
-    transformed = []
-    for marker in markers:
-        position = marker.position
-        if window is not None:
-            index = position - 1
-            if index < window.start or index >= window.stop:
-                continue
-            position = index - window.start + 1
-        transformed.append(
-            BrainVisionMarker(
-                marker_type=marker.marker_type,
-                description=marker.description,
-                position=map_brainvision_position(position, factor=factor),
-                size=(marker.size + factor - 1) // factor,
-                channel=marker.channel,
-                date=marker.date,
-                user_infos=marker.user_infos,
-            )
-        )
-    return tuple(transformed)
 
 
 def _validate_output_data(

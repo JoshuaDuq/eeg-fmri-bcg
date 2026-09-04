@@ -51,7 +51,6 @@ def _benchmark_document() -> dict[str, object]:
             "ecg_to_bcg_delay_seconds": 0.210,
             "aas_neighbor_count": 20,
             "pca_obs_components": 4,
-            "cross_fit_fold_count": 2,
             "null_surrogate_count": 20,
             "random_seed": 20260826,
         },
@@ -84,20 +83,16 @@ def test_load_correction_config_reads_method_and_window(tmp_path: Path) -> None:
         "ecg_to_bcg_delay_seconds": 0.21,
         "aas_neighbor_count": 20,
         "pca_obs_components": 4,
-        "cross_fit_fold_count": 2,
-        "maximum_residual_ratio": 0.5,
-        "residual_floor_uv": 5.0,
+        "evaluation": {"block_counts": [2, 5, 10, 20], "minimum_beats_per_block": 8},
         "maximum_gap_fraction": 0.05,
     }
-    config = load_correction_config(
-        _write_yaml(tmp_path / "correction.yml", document)
-    )
+    config = load_correction_config(_write_yaml(tmp_path / "correction.yml", document))
 
     assert isinstance(config, CorrectionRunConfig)
     assert config.method == "pca_obs"
     assert config.window_seconds == (-0.2, 0.7)
     assert config.pca_obs_components == 4
-    assert config.maximum_residual_ratio == pytest.approx(0.5)
+    assert config.evaluation.block_counts == (2, 5, 10, 20)
 
 
 def test_load_correction_config_rejects_unknown_method(tmp_path: Path) -> None:
@@ -108,9 +103,7 @@ def test_load_correction_config_rejects_unknown_method(tmp_path: Path) -> None:
         "ecg_to_bcg_delay_seconds": 0.21,
         "aas_neighbor_count": 20,
         "pca_obs_components": 4,
-        "cross_fit_fold_count": 2,
-        "maximum_residual_ratio": 0.5,
-        "residual_floor_uv": 5.0,
+        "evaluation": {"block_counts": [2, 5, 10, 20], "minimum_beats_per_block": 8},
         "maximum_gap_fraction": 0.05,
     }
     with pytest.raises(ConfigurationError, match="method"):
@@ -159,11 +152,7 @@ def test_config_rejects_unknown_fields(
     document[unknown_section][unknown_field] = True
 
     with pytest.raises(ConfigurationError, match="unexpected"):
-        loader = (
-            load_detection_config
-            if "input" in document
-            else load_benchmark_config
-        )
+        loader = load_detection_config if "input" in document else load_benchmark_config
         loader(_write_yaml(tmp_path / "invalid.yml", document))
 
 

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import repeat
 from pathlib import Path
 
 from bcg_correction.bcg_config import CorrectionRunConfig, DetectorConfig
 from bcg_correction.bcg_pipeline import run_bcg_correction
+from bcg_correction.evaluation import EvaluationSettings
 from bcg_correction.provenance import load_correction_provenance
 from bcgnet.compare.arms import Arm
 
@@ -28,9 +29,7 @@ class CorrectionSettings:
     ecg_to_bcg_delay_seconds: float
     aas_neighbor_count: int
     pca_obs_components: int
-    cross_fit_fold_count: int
-    maximum_residual_ratio: float
-    residual_floor_uv: float
+    evaluation: EvaluationSettings
     maximum_gap_fraction: float
     overwrite: bool
     detector: DetectorConfig
@@ -52,9 +51,7 @@ def _correct_one(config: CorrectionRunConfig) -> dict:
     return {"status": "ok", "marker_count": summary.marker_count}
 
 
-def _map_corrections(
-    configs: list[CorrectionRunConfig], workers: int
-) -> list[dict]:
+def _map_corrections(configs: list[CorrectionRunConfig], workers: int) -> list[dict]:
     if workers <= 1 or len(configs) <= 1:
         return [_correct_one(config) for config in configs]
     with ProcessPoolExecutor(max_workers=min(workers, len(configs))) as pool:
@@ -84,15 +81,16 @@ def _rebuild_one(
     provenance = load_correction_provenance(corrected)
     if provenance is None:
         raise FileNotFoundError(corrected.with_suffix(".bcg.json"))
+    raw = mne.io.read_raw_brainvision(source, preload=True, verbose="ERROR")
+    clean = mne.io.read_raw_brainvision(corrected, preload=True, verbose="ERROR")
     try:
-        raw = mne.io.read_raw_brainvision(source, preload=True, verbose="ERROR")
-        clean = mne.io.read_raw_brainvision(corrected, preload=True, verbose="ERROR")
-    except Exception as error:
-        print(f"  skip {corrected.name}: {error}")
-        return False
-    try:
-        if raw.n_times != clean.n_times or "ECG" not in raw.ch_names:
-            return False
+        if (
+            raw.n_times != clean.n_times
+            or raw.ch_names != clean.ch_names
+            or raw.info["sfreq"] != clean.info["sfreq"]
+            or "ECG" not in raw.ch_names
+        ):
+            raise ValueError(f"unaligned report input: {corrected}")
         profile = compute_correction_profile(
             raw.get_data(),
             clean.get_data(),
@@ -104,7 +102,9 @@ def _rebuild_one(
             window_seconds=provenance.window_seconds,
             gap_fraction=provenance.gap_fraction,
             method=arm.key,
-            label=corrected.stem,
+            label=source.stem,
+            subject=corrected.parent.name,
+            evaluation=settings.evaluation,
         )
     finally:
         raw.close()
@@ -141,6 +141,9 @@ def write_aggregate_reports(output_root: Path, arm: Arm) -> dict[str, int]:
         if stored.name.startswith("._"):
             continue
         profile = read_profile(stored)
+        if profile.method != arm.key:
+            raise ValueError(f"unexpected method profile: {stored}")
+        profile = replace(profile, subject=stored.parent.name)
         by_subject.setdefault(stored.parent.name, []).append(profile)
     if not by_subject:
         return {"subjects": 0, "recordings": 0}
@@ -217,14 +220,10 @@ def run_correction_batch(
                         detector=settings.detector,
                         method=arm.key,
                         window_seconds=settings.window_seconds,
-                        ecg_to_bcg_delay_seconds=(
-                            settings.ecg_to_bcg_delay_seconds
-                        ),
+                        ecg_to_bcg_delay_seconds=(settings.ecg_to_bcg_delay_seconds),
                         aas_neighbor_count=settings.aas_neighbor_count,
                         pca_obs_components=settings.pca_obs_components,
-                        cross_fit_fold_count=settings.cross_fit_fold_count,
-                        maximum_residual_ratio=settings.maximum_residual_ratio,
-                        residual_floor_uv=settings.residual_floor_uv,
+                        evaluation=settings.evaluation,
                         maximum_gap_fraction=settings.maximum_gap_fraction,
                     ),
                 )

@@ -26,12 +26,11 @@ class Arm:
 AAS = Arm(key="aas", label="AAS", suffix="aas")
 PCA_OBS = Arm(key="pca_obs", label="PCA-OBS", suffix="pcaobs")
 BCGNET = Arm(key="bcgnet", label="BCGNet", suffix="bcgnet")
-BLOCKED_MEAN = Arm(key="blocked_mean", label="Blocked mean", suffix="blockedmean")
 
 #: Bounded methods that ``bcg_correction`` can generate from FASTR input.
-COMPARATOR_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BLOCKED_MEAN)
+COMPARATOR_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS)
 
 #: Every corrected arm an overlay may show, in plotting order.
-CLEAN_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BLOCKED_MEAN, BCGNET)
+CLEAN_ARMS: tuple[Arm, ...] = (AAS, PCA_OBS, BCGNET)
 
 ARM_BY_COMMAND = {arm.command: arm for arm in CLEAN_ARMS}

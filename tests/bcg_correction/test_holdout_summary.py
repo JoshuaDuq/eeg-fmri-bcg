@@ -9,15 +9,15 @@ def test_subject_differences_give_each_participant_one_value() -> None:
     script = Path(__file__).parents[2] / "tools" / "summarize_holdout.py"
     differences = runpy.run_path(str(script))["_subject_paired_differences"]
     rows = [
-        {"subject": "sub-1", "recording": "a", "method": "blocked_mean", "x": 1.0},
+        {"subject": "sub-1", "recording": "a", "method": "pca_obs", "x": 1.0},
         {"subject": "sub-1", "recording": "a", "method": "aas", "x": 3.0},
-        {"subject": "sub-1", "recording": "b", "method": "blocked_mean", "x": 5.0},
+        {"subject": "sub-1", "recording": "b", "method": "pca_obs", "x": 5.0},
         {"subject": "sub-1", "recording": "b", "method": "aas", "x": 1.0},
-        {"subject": "sub-2", "recording": "a", "method": "blocked_mean", "x": 2.0},
+        {"subject": "sub-2", "recording": "a", "method": "pca_obs", "x": 2.0},
         {"subject": "sub-2", "recording": "a", "method": "aas", "x": 8.0},
     ]
 
-    result = differences(rows, metric="x", comparator="aas")
+    result = differences(rows, metric="x", first="pca_obs", second="aas")
 
     np.testing.assert_array_equal(result, [1.0, -6.0])
 
@@ -48,7 +48,7 @@ def test_holdout_summary_requires_every_current_metric(tmp_path: Path) -> None:
             {
                 "subject": "sub-1",
                 "recording": "run1",
-                "method": "blocked_mean",
+                "method": "pca_obs",
                 "detector_status": "ok",
             }
         )

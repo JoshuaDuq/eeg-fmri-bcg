@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from bcg_correction.bcg_config import DetectorConfig
+from bcg_correction.evaluation import parse_evaluation
 from bcgstudy.correction_batch import CorrectionSettings
 
 from ..config import ConfigurationError
@@ -111,9 +112,7 @@ _CORRECTION_KEYS = frozenset(
         "ecg_to_bcg_delay_seconds",
         "aas_neighbor_count",
         "pca_obs_components",
-        "cross_fit_fold_count",
-        "maximum_residual_ratio",
-        "residual_floor_uv",
+        "evaluation",
         "maximum_gap_fraction",
         "overwrite",
         "detector",
@@ -134,7 +133,6 @@ _DETECTOR_KEYS = frozenset(
         "refinement_iterations",
     }
 )
-
 
 
 def _workers(compute: Mapping[str, object]) -> int:
@@ -360,11 +358,7 @@ def load_compare_config(path: str | Path) -> CompareConfig:
                 correction, "aas_neighbor_count", minimum=2
             ),
             pca_obs_components=_integer(correction, "pca_obs_components", minimum=1),
-            cross_fit_fold_count=_integer(
-                correction, "cross_fit_fold_count", minimum=2
-            ),
-            maximum_residual_ratio=_fraction(correction, "maximum_residual_ratio"),
-            residual_floor_uv=_nonnegative_number(correction, "residual_floor_uv"),
+            evaluation=parse_evaluation(correction["evaluation"]),
             maximum_gap_fraction=_fraction(correction, "maximum_gap_fraction"),
             overwrite=_bool(correction, "overwrite"),
             detector=DetectorConfig(

@@ -46,11 +46,13 @@ from bcg_correction.figure_style import (
     ARTIFACT,
     COLLATERAL,
     CORRECTED,
+    DASH,
     INK,
     MUTED,
     STYLE,
     UNCORRECTED,
     panel,
+    save_figure,
 )
 from bcg_correction.metrics import (
     delay_estimation_eeg,
@@ -1136,16 +1138,6 @@ def _candidates(
                     ridge_penalty=ridge_penalty,
                 )
             )
-    candidates.append(
-        Candidate(
-            name="blocked_mean",
-            family="blocked_mean",
-            aggregator="mean",
-            features=None,
-            neighbor_count=None,
-            ridge_penalty=None,
-        )
-    )
     return tuple(candidates)
 
 
@@ -1372,7 +1364,6 @@ def _plot_metric_audit(rows: list[dict[str, object]], path: Path) -> None:
     family_colors = {
         "aas": ARTIFACT,
         "pca_obs": COLLATERAL,
-        "blocked_mean": "#999999",
         "temporal": MUTED,
         "rhythm_time": UNCORRECTED,
         "ecg04_rhythm_time": "#56B4E9",
@@ -1380,7 +1371,7 @@ def _plot_metric_audit(rows: list[dict[str, object]], path: Path) -> None:
         "ecg16_rhythm_time": "#E69F00",
     }
     with plt.rc_context(STYLE):
-        figure, axes = plt.subplots(1, 2, figsize=(12.2, 5.0))
+        figure, axes = plt.subplots(1, 2, figsize=(7.24, 3.55), layout="constrained")
         specifications = (
             (
                 "locked_ratio",
@@ -1412,19 +1403,19 @@ def _plot_metric_audit(rows: list[dict[str, object]], path: Path) -> None:
                         row["aggregator"],
                         "o",
                     ),
-                    s=34,
+                    s=22,
                     alpha=0.9,
+                    linewidths=0.35,
+                    edgecolors="white",
+                    zorder=3,
                 )
-                if method in {"aas", "pca_obs", "blocked_mean"}:
+                if method in {"aas", "pca_obs"}:
                     axis.annotate(
-                        {"aas": "AAS", "pca_obs": "PCA-OBS"}.get(
-                            method,
-                            "blocked mean",
-                        ),
+                        {"aas": "AAS", "pca_obs": "PCA-OBS"}[method],
                         (direct, projected),
                         xytext=(4, 4),
                         textcoords="offset points",
-                        fontsize=7,
+                        fontsize=6,
                         color=INK,
                     )
             bounds = np.asarray(coordinates)
@@ -1432,17 +1423,19 @@ def _plot_metric_audit(rows: list[dict[str, object]], path: Path) -> None:
             upper = float(np.max(bounds))
             margin = max(0.02 * (upper - lower), 1e-6)
             identity = (lower - margin, upper + margin)
-            axis.plot(identity, identity, color=MUTED, lw=0.8, ls="--")
+            axis.plot(identity, identity, color=MUTED, lw=0.7, ls=DASH, zorder=1)
             axis.set_xlabel(f"direct {title}")
             axis.set_ylabel(f"ECG-orthogonalized {title}")
             panel(axis, chr(65 + panel_index), title, subtitle)
         figure.suptitle(
             "Metric audit — no method-selection flag is computed",
-            fontsize=12,
+            fontsize=9.0,
+            fontweight="bold",
+            x=0.0,
+            ha="left",
             color=INK,
         )
-        figure.tight_layout()
-        figure.savefig(path, dpi=180)
+        save_figure(figure, path)
         plt.close(figure)
 
 

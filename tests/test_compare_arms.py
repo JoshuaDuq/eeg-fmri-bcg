@@ -39,7 +39,6 @@ def test_comparator_commands_are_derived_from_arm_keys() -> None:
     assert {arm.command for arm in COMPARATOR_ARMS} == {
         "aas",
         "pca-obs",
-        "blocked-mean",
     }
 
 
@@ -56,8 +55,7 @@ def test_bcgnet_is_not_a_comparator_arm() -> None:
 
 def test_every_arm_has_a_distinct_registered_colour() -> None:
     """An arm without a colour falls back, and a fallback that matches another
-    line on the same axes is invisible rather than obviously wrong. Blocked mean
-    shipped once drawn in the uncorrected trace's blue for exactly that reason.
+    line on the same axes is invisible rather than obviously wrong.
     """
     from bcg_correction.figure_style import ARM_COLORS, ARM_FALLBACK, UNCORRECTED
     from bcgnet.compare.arms import CLEAN_ARMS
@@ -80,3 +78,42 @@ def test_every_arm_writes_a_distinct_filename_suffix() -> None:
     assert len(set(suffixes)) == len(suffixes)
     keys = [arm.key for arm in CLEAN_ARMS]
     assert len(set(keys)) == len(keys)
+
+
+def test_every_arm_has_a_distinct_registered_marker() -> None:
+    """Colour alone does not identify an arm.
+
+    Okabe-Ito separates AAS from PCA-OBS by only dE 7.6 under deuteranopia,
+    inside the band that needs a second encoding, so the figures carry a marker
+    per arm. An arm with no marker falls back to one shared shape, which reads
+    as a registered arm rather than as a mistake.
+    """
+    from bcg_correction.figure_style import (
+        ARM_MARKERS,
+        UNCORRECTED_MARKER,
+        arm_marker,
+    )
+    from bcgnet.compare.arms import CLEAN_ARMS
+
+    missing = [arm.key for arm in CLEAN_ARMS if arm.key not in ARM_MARKERS]
+    assert not missing, f"arms with no registered marker: {missing}"
+
+    markers = [ARM_MARKERS[arm.key] for arm in CLEAN_ARMS]
+    assert len(set(markers)) == len(markers), "two arms share a marker"
+    assert UNCORRECTED_MARKER not in markers, "an arm is marked as the input trace"
+    assert arm_marker("not-an-arm") not in markers
+
+
+def test_every_arm_has_a_registered_display_label() -> None:
+    """Single-arm pages key by method, so an unregistered arm prints its key."""
+    from bcg_correction.figure_style import ARM_LABELS
+    from bcgnet.compare.arms import CLEAN_ARMS
+
+    missing = [arm.key for arm in CLEAN_ARMS if arm.key not in ARM_LABELS]
+    assert not missing, f"arms with no display label: {missing}"
+
+    labels = [ARM_LABELS[arm.key] for arm in CLEAN_ARMS]
+    assert len(set(labels)) == len(labels), "two arms share a label"
+    assert labels == [arm.label for arm in CLEAN_ARMS], (
+        "figure labels disagree with the arm registry"
+    )

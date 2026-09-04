@@ -74,7 +74,6 @@ def _write_compare_config(tmp_path: Path, *, workers: int = 1) -> Path:
             "fastr_root": str(tmp_path / "fastr"),
             "aas_root": str(tmp_path / "aas"),
             "pca_obs_root": str(tmp_path / "pca_obs"),
-            "blocked_mean_root": str(tmp_path / "blocked_mean"),
             "bcgnet_root": str(tmp_path / "bcgnet"),
             "output_root": str(tmp_path / "out"),
             "experiments_root": str(tmp_path / "experiments"),
@@ -83,7 +82,6 @@ def _write_compare_config(tmp_path: Path, *, workers: int = 1) -> Path:
         "run": {
             "aas": False,
             "pca_obs": False,
-            "blocked_mean": False,
             "bcgnet": False,
         },
         "correction": {
@@ -91,9 +89,10 @@ def _write_compare_config(tmp_path: Path, *, workers: int = 1) -> Path:
             "ecg_to_bcg_delay_seconds": 0.21,
             "aas_neighbor_count": 20,
             "pca_obs_components": 4,
-            "cross_fit_fold_count": 2,
-            "maximum_residual_ratio": 0.5,
-            "residual_floor_uv": 5.0,
+            "evaluation": {
+                "block_counts": [2, 5, 10, 20],
+                "minimum_beats_per_block": 8,
+            },
             "maximum_gap_fraction": 0.05,
             "overwrite": False,
             "detector": {
@@ -158,26 +157,13 @@ def test_aas_command_still_writes_into_the_aas_root(
     assert captured["output_root"] == (tmp_path / "aas").resolve()
 
 
-def test_blocked_mean_command_writes_into_its_own_root(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The new arm is a sibling of the other two, not a mode of one of them."""
-    from bcgnet.compare.arms import BLOCKED_MEAN
-
-    captured = _capture_batch(monkeypatch)
-    path = _write_compare_config(tmp_path)
-    assert main(["blocked-mean", "--config", str(path)]) == 0
-    assert captured["arm"] is BLOCKED_MEAN
-    assert captured["output_root"] == (tmp_path / "blocked_mean").resolve()
-
-
 def test_every_comparator_arm_writes_to_a_distinct_root(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Two arms sharing a root would silently overwrite each other's output."""
     path = _write_compare_config(tmp_path)
     roots = []
-    for command in ("aas", "pca-obs", "blocked-mean"):
+    for command in ("aas", "pca-obs"):
         captured = _capture_batch(monkeypatch)
         assert main([command, "--config", str(path)]) == 0
         roots.append(captured["output_root"])
@@ -228,5 +214,18 @@ def test_reports_rebuilds_bounded_and_comparative_pages(
 
     path = _write_compare_config(tmp_path)
     assert main(["reports", "--config", str(path)]) == 0
-    assert rebuilt == ["aas", "pca_obs", "blocked_mean"]
+    assert rebuilt == ["aas", "pca_obs"]
     assert len(compared) == 1
+
+
+def test_compare_cli_plots_only_passes_flag(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(config, *, plots_only=False):
+        captured["plots_only"] = plots_only
+        return []
+
+    monkeypatch.setattr("bcgnet.compare.pipeline.run_comparison", fake_run)
+    path = _write_compare_config(tmp_path)
+    assert main(["compare", "--config", str(path), "--plots-only"]) == 0
+    assert captured["plots_only"] is True

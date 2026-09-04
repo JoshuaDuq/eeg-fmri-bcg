@@ -76,7 +76,6 @@ def test_benchmark_bcg_command_loads_configuration(
                     "ecg_to_bcg_delay_seconds": 0.21,
                     "aas_neighbor_count": 20,
                     "pca_obs_components": 3,
-                    "cross_fit_fold_count": 2,
                     "null_surrogate_count": 10,
                     "random_seed": 42,
                 },

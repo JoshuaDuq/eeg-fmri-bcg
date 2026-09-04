@@ -5,6 +5,7 @@ import mne
 import numpy as np
 import pytest
 
+from bcg_correction.evaluation import EvaluationSettings
 from bcg_correction.provenance import (
     CorrectionProvenance,
     load_correction_provenance,
@@ -13,12 +14,10 @@ from bcgnet.compare.pairs import RecordingSet
 from bcgnet.compare.plots import metrics_row
 from bcgnet.compare.qc import (
     alpha_peak_height,
-    median_locked_ratio,
-    method_qc_flags,
-    remaining_ratio,
-    removal_profile,
     shared_detector_provenance,
 )
+
+_EVALUATION = EvaluationSettings((2, 5, 10, 20), 8)
 
 
 def test_alpha_peak_height_picks_the_ten_hz_bin() -> None:
@@ -27,56 +26,6 @@ def test_alpha_peak_height_picks_the_ten_hz_bin() -> None:
     pxx[freqs == 10.0] = 8.0
     pxx[freqs == 12.0] = 3.0
     assert alpha_peak_height(freqs, pxx) == pytest.approx(8.0)
-
-
-def test_remaining_ratio_flags_added_power() -> None:
-    assert remaining_ratio(2.0, 1.0) == pytest.approx(2.0)
-    assert remaining_ratio(0.4, 1.0) == pytest.approx(0.4)
-
-
-def test_qc_flags_prefer_a_comparator_when_bcgnet_adds_power() -> None:
-    flags = method_qc_flags(
-        remaining_ratios={"delta": 1.6, "theta": 0.5, "alpha": 0.4},
-        locked_ratio=0.7,
-        alpha_peak_raw=8.0,
-        alpha_peak_bcgnet=7.5,
-    )
-    assert flags["bcgnet_adds_power"] is True
-    assert flags["prefer_comparator"] is True
-    assert flags["bcgnet_locked_worse_than_raw"] is False
-
-
-def test_qc_flags_do_not_prefer_a_comparator_only_because_alpha_peak_fell() -> None:
-    flags = method_qc_flags(
-        remaining_ratios={"delta": 0.4, "theta": 0.3, "alpha": 0.3},
-        locked_ratio=0.3,
-        alpha_peak_raw=20.0,
-        alpha_peak_bcgnet=4.0,
-    )
-    assert flags["alpha_peak_collapsed"] is True
-    assert flags["prefer_comparator"] is False
-
-
-def test_qc_flags_prefer_a_comparator_when_locked_residual_increases() -> None:
-    flags = method_qc_flags(
-        remaining_ratios={"delta": 0.6, "theta": 0.4, "alpha": 0.5},
-        locked_ratio=1.2,
-        alpha_peak_raw=8.0,
-        alpha_peak_bcgnet=7.0,
-    )
-    assert flags["bcgnet_locked_worse_than_raw"] is True
-    assert flags["prefer_comparator"] is True
-
-
-def test_qc_flags_keep_bcgnet_when_harmonics_fall_and_alpha_peak_stays() -> None:
-    flags = method_qc_flags(
-        remaining_ratios={"delta": 0.6, "theta": 0.3, "alpha": 0.5},
-        locked_ratio=0.4,
-        alpha_peak_raw=8.0,
-        alpha_peak_bcgnet=7.2,
-    )
-    assert flags["prefer_comparator"] is False
-    assert flags["alpha_peak_collapsed"] is False
 
 
 def test_detector_peaks_load_from_a_pca_obs_provenance_file(
@@ -175,7 +124,9 @@ def test_metrics_row_reports_pca_obs_under_its_own_columns(
     row = metrics_row(
         _recording(tmp_path),
         {"Raw": _raw(), "PCA-OBS": _raw(scale=0.5)},
+        profiles={},
         max_hz=30.0,
+        evaluation=_EVALUATION,
     )
     assert row["has_pca_obs"] is True
     assert row["has_aas"] is False
@@ -189,9 +140,19 @@ def test_metrics_row_columns_do_not_depend_on_which_arms_exist(
 ) -> None:
     """compare_summary.csv is one table, so every row needs the same columns."""
     recording = _recording(tmp_path)
-    only_aas = metrics_row(recording, {"Raw": _raw(), "AAS": _raw(0.5)}, max_hz=30.0)
+    only_aas = metrics_row(
+        recording,
+        {"Raw": _raw(), "AAS": _raw(0.5)},
+        profiles={},
+        max_hz=30.0,
+        evaluation=_EVALUATION,
+    )
     only_net = metrics_row(
-        recording, {"Raw": _raw(), "BCGNet": _raw(0.5)}, max_hz=30.0
+        recording,
+        {"Raw": _raw(), "BCGNet": _raw(0.5)},
+        profiles={},
+        max_hz=30.0,
+        evaluation=_EVALUATION,
     )
     assert list(only_aas.keys()) == list(only_net.keys())
 
@@ -205,7 +166,9 @@ def test_metrics_row_keeps_every_arm_separate(tmp_path: Path) -> None:
             "PCA-OBS": _raw(scale=0.25),
             "BCGNet": _raw(scale=0.125),
         },
+        profiles={},
         max_hz=30.0,
+        evaluation=_EVALUATION,
     )
     ratios = [
         row["delta_aas_ratio"],
@@ -217,8 +180,7 @@ def test_metrics_row_keeps_every_arm_separate(tmp_path: Path) -> None:
 
 
 def test_profile_computation_errors_surface(tmp_path: Path, monkeypatch) -> None:
-    from bcg_correction import correction_report
-    from bcgnet.compare import pipeline
+    from bcgnet.compare import plots
 
     provenance = CorrectionProvenance(
         peak_samples=np.asarray([100, 900, 1700]),
@@ -226,35 +188,16 @@ def test_profile_computation_errors_surface(tmp_path: Path, monkeypatch) -> None
         window_seconds=(-0.2, 0.7),
         gap_fraction=0.0,
     )
-    monkeypatch.setattr(pipeline, "detector_provenance", lambda recording: provenance)
+    monkeypatch.setattr(plots, "detector_provenance", lambda recording: provenance)
 
     def fail(*args, **kwargs):
         raise RuntimeError("invalid profile input")
 
-    monkeypatch.setattr(correction_report, "compute_correction_profile", fail)
+    monkeypatch.setattr(plots, "compute_correction_profile", fail)
 
     with pytest.raises(RuntimeError, match="invalid profile input"):
-        pipeline._collect_profiles(
+        plots.measure_recording(
             _recording(tmp_path),
             {"Raw": _raw(), "AAS": _raw(0.5)},
-            {},
-        )
-
-
-@pytest.mark.parametrize("metric", [median_locked_ratio, removal_profile])
-def test_locked_metric_errors_surface(monkeypatch, metric) -> None:
-    from bcgnet.compare import qc
-
-    def fail(*args, **kwargs):
-        raise RuntimeError("invalid EEG geometry")
-
-    monkeypatch.setattr(qc, "delay_estimation_eeg", fail)
-
-    with pytest.raises(RuntimeError, match="invalid EEG geometry"):
-        metric(
-            _raw(),
-            _raw(0.5),
-            peak_samples=np.asarray([100, 900, 1700]),
-            delay_seconds=0.19,
-            window_seconds=(-0.2, 0.7),
+            _EVALUATION,
         )

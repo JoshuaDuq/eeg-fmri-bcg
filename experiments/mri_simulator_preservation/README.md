@@ -102,3 +102,30 @@ uv run python experiments/mri_simulator_preservation/run.py \
 
 `--limit N` measures the first N paired runs (smoke). The inclusion ledger
 still records every configured run.
+
+## Results (this dataset)
+
+Five participants, 29 paired runs, 316 kept trials. `sub-0010` is out
+(sequence mismatch or missing PCA-OBS). `sub-0021` run 6 is out (no AAS).
+The reference-only mask dropped 3 trials; it no longer rejects on corrected
+amplitude.
+
+Participant-median absolute error \(E\) (dB, lower is closer to the simulator)
+and improvement versus FASTR (positive is closer to the simulator than FASTR):
+
+| series | median \(E\) | vs FASTR | cardiac residual |
+|--------|-------------:|---------:|-----------------:|
+| FASTR | 1.96 | 0 | 1.00 |
+| PCA-OBS | 2.33 | −0.31 | 0.47 |
+| AAS | 2.42 | −0.04 | 0.58 |
+| BCGNet | 2.83 | −0.59 | 0.45 |
+
+Every participant-level value is in `participant_summary.csv`. Five people are
+too few to hide behind the group median. PCA-OBS is closer to the simulator
+than FASTR for `sub-0011`; AAS is closer for `sub-0020` and `sub-0021`. On
+the participant median, FASTR remains the closest scanner series. BCGNet
+leaves the smallest cardiac-locked residual.
+
+No method both beats FASTR on outside-field 8-13 Hz concordance **and**
+removes cardiac artifact in this cohort. That is concordance with an
+outside-field thermal response, not ground-truth alpha preservation.

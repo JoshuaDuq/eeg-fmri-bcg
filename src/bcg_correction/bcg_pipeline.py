@@ -12,7 +12,6 @@ import numpy as np
 from .bcg import (
     BcgCorrectionConfig,
     BcgCorrectionResult,
-    BcgInputError,
     correct_bcg,
     rr_gap_spans,
 )
@@ -23,13 +22,13 @@ from .cardiac import CardiacDetection, CardiacInputError, detect_r_peaks
 from .cardiac_markers import append_pulse_markers, validate_fastr_marker_input
 from .correction_report import (
     compute_correction_profile,
+    profile_metrics,
     save_correction_report,
     write_profile,
 )
 from .metrics import (
     RECORDING_DELAY_WINDOW_SECONDS,
     BcgDelayScan,
-    cardiac_locked_rms,
     delay_estimation_eeg,
     estimate_ecg_to_bcg_delay,
 )
@@ -45,18 +44,6 @@ class BcgCorrectionSummary:
     marker_count: int
     status: str
     applied_delay_seconds: float
-
-
-@dataclass(frozen=True, slots=True)
-class BcgResidualQuality:
-    """Recording-level heartbeat-locked energy before and after correction."""
-
-    before_median_rms_uv: float
-    after_median_rms_uv: float
-    ratio: float
-    maximum_allowed_ratio: float
-    #: Absolute residual below which the ratio no longer gates output.
-    residual_floor_uv: float
 
 
 #: The one degradation that does not make a recording uncorrectable.
@@ -84,9 +71,7 @@ def _require_usable_detection(
         return
     if not reasons:
         raise CardiacInputError("degraded ECG detection")
-    fatal = tuple(
-        reason for reason in reasons if reason != GAP_DEGRADATION_REASON
-    )
+    fatal = tuple(reason for reason in reasons if reason != GAP_DEGRADATION_REASON)
     if fatal:
         detail = ", ".join(fatal)
         raise CardiacInputError(f"degraded ECG detection: {detail}")
@@ -138,65 +123,6 @@ def _channel_index(names: tuple[str, ...], channel_name: str) -> int:
         ) from error
 
 
-def _measure_residual_quality(
-    before_data_volts: np.ndarray,
-    after_data_volts: np.ndarray,
-    channel_names: tuple[str, ...],
-    *,
-    ecg_index: int,
-    peak_samples: np.ndarray,
-    sampling_rate_hz: float,
-    delay_seconds: float,
-    window_seconds: tuple[float, float],
-    maximum_ratio: float,
-    residual_floor_uv: float,
-) -> BcgResidualQuality:
-    locked_window = (
-        delay_seconds + window_seconds[0],
-        delay_seconds + window_seconds[1],
-    )
-    before_eeg_uv = delay_estimation_eeg(
-        before_data_volts,
-        channel_names,
-        ecg_channel_index=ecg_index,
-    ) * 1e6
-    after_eeg_uv = delay_estimation_eeg(
-        after_data_volts,
-        channel_names,
-        ecg_channel_index=ecg_index,
-    ) * 1e6
-    before_rms = cardiac_locked_rms(
-        before_eeg_uv,
-        peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        window_seconds=locked_window,
-    )
-    after_rms = cardiac_locked_rms(
-        after_eeg_uv,
-        peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        window_seconds=locked_window,
-    )
-    before_median = float(np.median(before_rms))
-    if before_median == 0.0:
-        raise BcgInputError("BCG residual ratio has a zero before-correction RMS")
-    after_median = float(np.median(after_rms))
-    ratio = after_median / before_median
-    if ratio > maximum_ratio and after_median > residual_floor_uv:
-        raise BcgInputError(
-            f"BCG residual ratio {ratio:.3f} exceeds maximum "
-            f"{maximum_ratio:.3f} with {after_median:.2f} uV still locked, "
-            f"above the {residual_floor_uv:.2f} uV floor"
-        )
-    return BcgResidualQuality(
-        before_median_rms_uv=before_median,
-        after_median_rms_uv=after_median,
-        ratio=ratio,
-        maximum_allowed_ratio=maximum_ratio,
-        residual_floor_uv=residual_floor_uv,
-    )
-
-
 def _ensure_outputs_are_absent(output_paths: dict[str, Path]) -> None:
     existing = tuple(path for path in output_paths.values() if path.exists())
     if existing:
@@ -237,7 +163,7 @@ def _write_provenance(
     gap_spans: tuple[tuple[int, int], ...],
     gap_fraction: float,
     delay_scan: BcgDelayScan,
-    residual_quality: BcgResidualQuality,
+    residual_quality: dict,
     output_paths: dict[str, Path],
 ) -> None:
     payload = {
@@ -249,7 +175,6 @@ def _write_provenance(
         "ecg_to_bcg_delay_seconds": delay_scan.best_delay_seconds,
         "aas_neighbor_count": config.aas_neighbor_count,
         "pca_obs_components": config.pca_obs_components,
-        "cross_fit_fold_count": config.cross_fit_fold_count,
         "detector": asdict(config.detector),
         "peak_samples": detection.peak_samples.tolist(),
         "quality": asdict(detection.quality),
@@ -257,7 +182,8 @@ def _write_provenance(
         "rr_gap_spans": [list(span) for span in gap_spans],
         "rr_gap_fraction": gap_fraction,
         "maximum_gap_fraction": config.maximum_gap_fraction,
-        "residual_qc": asdict(residual_quality),
+        "residual_qc": residual_quality,
+        "evaluation": asdict(config.evaluation),
         "delay_estimation": {
             "configured_delay_seconds": config.ecg_to_bcg_delay_seconds,
             "best_delay_seconds": delay_scan.best_delay_seconds,
@@ -268,7 +194,7 @@ def _write_provenance(
         },
     }
     with path.open("x", encoding="utf-8") as provenance_file:
-        json.dump(payload, provenance_file, indent=2)
+        json.dump(payload, provenance_file, indent=2, allow_nan=False)
         provenance_file.write("\n")
 
 
@@ -280,9 +206,7 @@ def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
     output_paths = _output_paths(output_vhdr)
     _ensure_outputs_are_absent(output_paths)
 
-    raw = mne.io.read_raw_brainvision(
-        config.input_vhdr, preload=True, verbose="ERROR"
-    )
+    raw = mne.io.read_raw_brainvision(config.input_vhdr, preload=True, verbose="ERROR")
     try:
         names = tuple(raw.ch_names)
         sampling_rate_hz = float(raw.info["sfreq"])
@@ -333,20 +257,22 @@ def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
             ecg_to_bcg_delay_seconds=delay_scan.best_delay_seconds,
             aas_neighbor_count=config.aas_neighbor_count,
             pca_obs_components=config.pca_obs_components,
-            cross_fit_fold_count=config.cross_fit_fold_count,
         ),
     )
-    residual_quality = _measure_residual_quality(
+    profile = compute_correction_profile(
         data,
         correction.data_volts,
         names,
-        ecg_index=ecg_index,
+        ecg_channel_index=ecg_index,
         peak_samples=detection.peak_samples,
         sampling_rate_hz=sampling_rate_hz,
         delay_seconds=delay_scan.best_delay_seconds,
         window_seconds=config.window_seconds,
-        maximum_ratio=config.maximum_residual_ratio,
-        residual_floor_uv=config.residual_floor_uv,
+        gap_fraction=gap_fraction,
+        method=config.method,
+        label=config.input_vhdr.stem,
+        subject=output_vhdr.parent.name,
+        evaluation=config.evaluation,
     )
     markers = append_pulse_markers(
         source.markers,
@@ -369,35 +295,25 @@ def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
         gap_spans=rr_gaps,
         gap_fraction=gap_fraction,
         delay_scan=delay_scan,
-        residual_quality=residual_quality,
+        residual_quality={
+            "status": "descriptive_only_not_an_acceptance_gate",
+            "preservation_status": "not_measured",
+            "profile": str(output_paths["profile"]) if profile is not None else None,
+            "metrics": profile_metrics(profile) if profile is not None else None,
+        },
         output_paths=output_paths,
     )
     # Called after provenance on purpose: the page is a diagnostic, and a
     # plotting failure must not cost the record of what was written.
-    profile = compute_correction_profile(
-        data,
-        correction.data_volts,
-        names,
-        ecg_channel_index=ecg_index,
-        peak_samples=detection.peak_samples,
-        sampling_rate_hz=sampling_rate_hz,
-        delay_seconds=delay_scan.best_delay_seconds,
-        window_seconds=config.window_seconds,
-        gap_fraction=gap_fraction,
-        method=config.method,
-        label=output_vhdr.stem,
-    )
     if profile is not None:
+        write_profile(profile, output_paths["profile"])
         save_correction_report(
             profile,
             title=(
-                f"{output_vhdr.stem}  \u2014  "
-                f"{config.method.upper()} correction report"
+                f"{output_vhdr.stem}  \u2014  {config.method.upper()} correction report"
             ),
             output=output_paths["report"],
         )
-        # The subject and cohort pages average these instead of re-reading EEG.
-        write_profile(profile, output_paths["profile"])
     return BcgCorrectionSummary(
         output_vhdr=output_paths["vhdr"],
         provenance_json=output_paths["json"],
@@ -406,5 +322,3 @@ def run_bcg_correction(config: CorrectionRunConfig) -> BcgCorrectionSummary:
         status=detection.quality.status,
         applied_delay_seconds=delay_scan.best_delay_seconds,
     )
-
-

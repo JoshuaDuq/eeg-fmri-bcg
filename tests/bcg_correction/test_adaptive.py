@@ -5,14 +5,11 @@ import numpy as np
 
 from bcg_correction.adaptive import (
     AdaptiveEpochConfig,
-    apply_template_predictions,
     apply_template_predictions_to_recording,
     combine_feature_groups,
     contiguous_cross_fit_training_mask,
     continuous_epoch_metric_variants,
-    correct_cross_fitted_reference_mean,
     epoch_correction_metrics,
-    pareto_nondominated,
     predict_cross_fitted_mean_templates,
     predict_cross_fitted_median_templates,
     predict_cross_fitted_reference_residual_mean_templates,
@@ -199,24 +196,6 @@ def test_feature_groups_contribute_equal_average_squared_scale() -> None:
     first_group_variance = np.mean(combined[:, :1] ** 2)
     second_group_variance = np.sum(combined[:, 1:] ** 2, axis=1).mean()
     np.testing.assert_allclose(first_group_variance, second_group_variance)
-
-
-def test_cross_fitted_correction_preserves_a_target_only_event() -> None:
-    artifact = np.array([0.0, 0.5, 1.0, 0.5, 0.0, -0.5, -1.0, -0.5, 0.0])
-    epochs = np.repeat(artifact[np.newaxis, np.newaxis, :], 6, axis=0)
-    target_event = np.array([0.0, 0.0, 0.0, 2.0, 4.0, 2.0, 0.0, 0.0, 0.0])
-    epochs[2, 0] += target_event
-    features = np.arange(6, dtype=np.float64)[:, np.newaxis]
-
-    predictions = predict_cross_fitted_templates(
-        epochs,
-        features,
-        ~np.eye(6, dtype=bool),
-        neighbor_count=2,
-    )
-    corrected = apply_template_predictions(epochs, predictions)
-
-    np.testing.assert_allclose(corrected[2, 0], target_event, atol=1e-12)
 
 
 def test_continuous_correction_averages_overlapping_predictions() -> None:
@@ -482,102 +461,3 @@ def test_reference_residual_mean_uses_training_beats_only() -> None:
     )
 
     np.testing.assert_array_equal(repeated[2:4], original[2:4])
-
-
-def test_cross_fitted_correction_preserves_ecg_and_excludes_target_block() -> None:
-    sampling_rate = 100.0
-    peaks = np.array([10, 30, 50, 70], dtype=np.int64)
-    shape = np.sin(np.linspace(0.0, np.pi, 10))
-    data = np.zeros((3, 100), dtype=float)
-    data[2] = np.cos(np.arange(100) / 8.0)
-    for peak in peaks:
-        data[:2, peak : peak + 10] += shape
-
-    original = correct_cross_fitted_reference_mean(
-        data,
-        ecg_channel_index=2,
-        peak_samples=peaks,
-        sampling_rate_hz=sampling_rate,
-        delay_seconds=0.0,
-        window_seconds=(0.0, 0.1),
-        fold_count=2,
-    )
-    changed = data.copy()
-    changed[:2, :40] += 1_000.0
-    repeated = correct_cross_fitted_reference_mean(
-        changed,
-        ecg_channel_index=2,
-        peak_samples=peaks,
-        sampling_rate_hz=sampling_rate,
-        delay_seconds=0.0,
-        window_seconds=(0.0, 0.1),
-        fold_count=2,
-    )
-
-    np.testing.assert_array_equal(original[2], data[2])
-    np.testing.assert_allclose(repeated[:2, 10:20], original[:2, 10:20] + 1_000.0)
-    np.testing.assert_allclose(repeated[:2, 30:40], original[:2, 30:40] + 1_000.0)
-
-
-def test_pareto_comparison_keeps_real_tradeoffs_without_a_cutoff() -> None:
-    locked_ratios = np.array([0.50, 0.40, 0.60, 0.50])
-    held_out_ratios = np.array([0.90, 1.10, 1.00, 0.90])
-    alpha_collateral = np.array([0.20, 0.30, 0.40, 0.20])
-    negative_specificity = -np.array([0.80, 0.90, 0.70, 0.80])
-
-    nondominated = pareto_nondominated(
-        locked_ratios,
-        held_out_ratios,
-        alpha_collateral,
-        negative_specificity,
-    )
-
-    np.testing.assert_array_equal(nondominated, [True, True, False, True])
-
-
-def test_reference_scaled_mean_uses_training_eeg_only_but_target_reference() -> None:
-    """The template may not see the target's EEG; it must see the target's ECG.
-
-    The reference channel is not corrected, so evaluating the training-fold
-    projection on the target's own reference is not leakage, and it is what
-    removes the volume-conducted cardiac field from that beat.
-    """
-    from bcg_correction.adaptive import (
-        predict_cross_fitted_reference_scaled_mean_templates,
-    )
-
-    rng = np.random.default_rng(0)
-    reference_epochs = rng.normal(size=(8, 5))
-    eeg_epochs = 3.0 * reference_epochs[:, np.newaxis, :] + rng.normal(
-        scale=0.01, size=(8, 2, 5)
-    )
-    mask = contiguous_cross_fit_training_mask(
-        np.arange(8, dtype=np.int64) * 10,
-        epoch_samples=5,
-        fold_count=4,
-    )
-    original = predict_cross_fitted_reference_scaled_mean_templates(
-        eeg_epochs, reference_epochs, mask
-    )
-    # The prediction for a beat tracks that beat's own reference trace.
-    np.testing.assert_allclose(
-        original[2] - original[2].mean(axis=1, keepdims=True),
-        np.broadcast_to(
-            3.0 * (reference_epochs[2] - reference_epochs[2].mean()), (2, 5)
-        ),
-        atol=0.2,
-    )
-
-    changed = eeg_epochs.copy()
-    changed[2:4] += 10_000.0
-    repeated = predict_cross_fitted_reference_scaled_mean_templates(
-        changed, reference_epochs, mask
-    )
-    np.testing.assert_array_equal(repeated[2:4], original[2:4])
-
-    other_reference = reference_epochs.copy()
-    other_reference[2] += 1.0
-    shifted = predict_cross_fitted_reference_scaled_mean_templates(
-        eeg_epochs, other_reference, mask
-    )
-    assert not np.allclose(shifted[2], original[2])

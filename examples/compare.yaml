@@ -2,7 +2,7 @@
 # Copy to the repository root as compare.yaml and set the paths.
 #
 # Keep the run flags false unless you want `bcg compare` to generate an arm
-# first (same code paths as `bcg aas` / `bcg pca-obs` / `bcg blocked-mean`).
+# first (same code paths as `bcg aas` / `bcg pca-obs`).
 
 paths:
   fastr_root: /path/to/fastr_python
@@ -10,7 +10,6 @@ paths:
   aas_root: /path/to/fastr_python_bcg
   # PCA-OBS writes *_fastr_pcaobs.vhdr here.
   pca_obs_root: /path/to/fastr_python_pcaobs
-  blocked_mean_root: /path/to/fastr_python_blockedmean
   bcgnet_root: /path/to/fastr_python_bcgnet
   output_root: /path/to/bcg_compare
   # Generated method-vs-method pages; relative to this config's folder.
@@ -25,7 +24,6 @@ compute:
 run:
   aas: false
   pca_obs: false
-  blocked_mean: false
   bcgnet: false
 
 # Used only when run.bcgnet is true. A relative path resolves against the
@@ -38,25 +36,16 @@ correction:
   window_seconds: [-0.2, 0.7]
   ecg_to_bcg_delay_seconds: 0.210
   aas_neighbor_count: 20
-  # Two, not the MNE default of four. Swept on this cohort (n=42): components
-  # 3 and 4 removed no additional artifact -- 1-4 Hz phase-locked removal was
-  # flat at 18.3 / 18.5 / 18.3 for 2 / 3 / 4 -- while alpha taken as collateral
-  # climbed 18.7% -> 26.6% -> 33.1%. Every component past the second was pure
-  # signal loss, and n=2 beat n=3 on alpha in 42 of 42 recordings.
+  # Historical within-cohort sweep: variable alpha removal increased at 3/4
+  # components. That diagnostic cannot identify neural loss; choice is exploratory.
   pca_obs_components: 2
-  # Contiguous held-out blocks for the blocked-mean arm: each beat is
-  # corrected by the mean of the beats outside its own block (plus that
-  # block's ECG projection of the beat's own ECG), so nothing subtracted from
-  # a beat's EEG was estimated from that beat.
-  cross_fit_fold_count: 10
-  # Calibrated at 1000 Hz: the ratio rises with sampling rate, so recalibrate
-  # rather than reuse this number at another rate.
-  maximum_residual_ratio: 0.5
-  # The ratio above is scale-free, so a recording that began with little
-  # heartbeat-locked energy cannot halve it however well the correction ran.
-  # Below this absolute locked residual the ratio stops gating output. 5 uV is
-  # under the p10 of *raw* locked amplitude across recordings that pass.
-  residual_floor_uv: 5.0
+  # Fixed exploratory resolutions from the 2026-09-02 cancellation audit, not
+  # an optimized winner-selection scale. Eight beats is a minimum support rule,
+  # not a validated noise cutoff. Unsupported scales are explicitly unavailable.
+  # Residuals are diagnostic only; no calibrated acceptance threshold exists.
+  evaluation:
+    block_counts: [2, 5, 10, 20]
+    minimum_beats_per_block: 8
   # No template is subtracted where no beat was detected, so an RR gap leaves
   # full-amplitude BCG in a bounded span. Those spans are written to the output
   # as "Bad Interval" markers for downstream rejection; above this share of the

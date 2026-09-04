@@ -204,20 +204,6 @@ def combine_feature_groups(*feature_groups: npt.ArrayLike) -> np.ndarray:
     return np.concatenate(standardized, axis=1)
 
 
-def apply_template_predictions(
-    eeg_epochs: npt.ArrayLike,
-    predicted_templates: npt.ArrayLike,
-) -> npt.NDArray[np.float64]:
-    """Subtract predicted artifacts with a splice-safe cosine taper."""
-    epochs = _validate_epochs(eeg_epochs)
-    predictions = _validate_epochs(predicted_templates)
-    if predictions.shape != epochs.shape:
-        raise AdaptiveInputError(
-            "predicted_templates must have the same shape as eeg_epochs"
-        )
-    return epochs - predictions * _cosine_taper(epochs.shape[2])
-
-
 def apply_template_predictions_to_recording(
     eeg: npt.ArrayLike,
     window_starts: npt.ArrayLike,
@@ -266,71 +252,6 @@ def apply_template_predictions_to_recording(
     covered = correction_count > 0
     corrected[:, covered] -= (
         correction_sum[:, covered] / correction_count[covered]
-    )
-    return corrected
-
-
-def correct_cross_fitted_reference_mean(
-    data_volts: npt.ArrayLike,
-    *,
-    ecg_channel_index: int,
-    peak_samples: npt.ArrayLike,
-    sampling_rate_hz: float,
-    delay_seconds: float,
-    window_seconds: tuple[float, float],
-    fold_count: int,
-) -> npt.NDArray[np.float64]:
-    """The blocked-mean correction, on a bare array.
-
-    Same method as ``bcg_correction.bcg.correct_bcg(method="blocked_mean")``;
-    the experiment tools call this form because they already hold the beats and
-    delay. The two are held equal by test, so a change here is a change there.
-    """
-    data = _validate_recording(data_volts)
-    if (
-        isinstance(ecg_channel_index, bool)
-        or not isinstance(ecg_channel_index, Integral)
-        or not 0 <= ecg_channel_index < data.shape[0]
-    ):
-        raise AdaptiveInputError("ecg_channel_index is outside data_volts")
-    sampling_rate = _validate_sampling_rate(sampling_rate_hz)
-    peaks = _validate_peaks(peak_samples, data.shape[1])
-    _validate_finite_number(delay_seconds, name="delay_seconds")
-    _validate_interval(window_seconds, name="window_seconds")
-    _validate_positive_integer(fold_count, name="fold_count")
-
-    window_start, window_stop = _window_offsets(
-        window_seconds,
-        sampling_rate,
-        delay_seconds=float(delay_seconds),
-    )
-    epoch_samples = window_stop - window_start
-    starts = peaks + window_start
-    complete = (starts >= 0) & (starts + epoch_samples <= data.shape[1])
-    starts = starts[complete]
-    training_mask = contiguous_cross_fit_training_mask(
-        starts,
-        epoch_samples=epoch_samples,
-        fold_count=fold_count,
-    )
-
-    eeg_indices = np.asarray(
-        [index for index in range(data.shape[0]) if index != ecg_channel_index],
-        dtype=np.int64,
-    )
-    epoch_indices = starts[:, np.newaxis] + np.arange(epoch_samples)
-    epochs = data[eeg_indices][:, epoch_indices].transpose(1, 0, 2)
-    reference_epochs = data[ecg_channel_index, epoch_indices]
-    predictions = predict_cross_fitted_reference_scaled_mean_templates(
-        epochs,
-        reference_epochs,
-        training_mask,
-    )
-    corrected = data.copy()
-    corrected[eeg_indices] = apply_template_predictions_to_recording(
-        data[eeg_indices],
-        starts,
-        predictions,
     )
     return corrected
 
@@ -475,37 +396,6 @@ def continuous_epoch_metric_variants(
     )
 
 
-def pareto_nondominated(
-    *objectives: npt.ArrayLike,
-) -> npt.NDArray[np.bool_]:
-    """Return methods not dominated across two or more objectives.
-
-    Lower is better for every input. Equal points are all retained because a
-    Pareto comparison expresses trade-offs; it is not a hidden selection gate.
-    """
-    if len(objectives) < 2:
-        raise AdaptiveInputError("Pareto comparison requires two objectives")
-    validated = tuple(
-        _validate_objectives(values, name=f"objectives[{index}]")
-        for index, values in enumerate(objectives)
-    )
-    if any(values.shape != validated[0].shape for values in validated[1:]):
-        raise AdaptiveInputError("Pareto objectives must have the same shape")
-    objective_matrix = np.column_stack(validated)
-    nondominated = np.ones(objective_matrix.shape[0], dtype=bool)
-    for target in range(objective_matrix.shape[0]):
-        no_worse = np.all(
-            objective_matrix <= objective_matrix[target],
-            axis=1,
-        )
-        strictly_better = np.any(
-            objective_matrix < objective_matrix[target],
-            axis=1,
-        )
-        nondominated[target] = not np.any(no_worse & strictly_better)
-    return nondominated
-
-
 def contiguous_cross_fit_training_mask(
     window_starts: npt.ArrayLike,
     *,
@@ -627,9 +517,7 @@ def predict_cross_fitted_reference_residual_mean_templates(
     either stage of its own prediction.
 
     Experiment variant. The template is ECG-free, so subtracting it leaves the
-    target beat's own volume-conducted ECG in the output; the ``blocked_mean``
-    arm uses ``predict_cross_fitted_reference_scaled_mean_templates``, which
-    removes it.
+    target beat's own volume-conducted ECG in the output.
     """
     epochs = _validate_epochs(eeg_epochs)
     reference = np.asarray(reference_epochs)
@@ -675,107 +563,6 @@ def predict_cross_fitted_reference_residual_mean_templates(
             template_cache[cache_key] = template
         predictions[target_index] = template
     return predictions
-
-
-def predict_cross_fitted_reference_scaled_mean_templates(
-    eeg_epochs: npt.ArrayLike,
-    reference_epochs: npt.ArrayLike,
-    training_mask: npt.ArrayLike,
-) -> npt.NDArray[np.float64]:
-    """Training-fold ECG-residual mean, plus that fold's ECG projection of the
-    target beat's own reference trace.
-
-    This is the estimate ``blocked_mean`` subtracts. For every training set,
-    one scalar per channel regresses the reference out of the training beats,
-    and the mean of what is left is the BCG template. The prediction for a
-    target beat is that template **plus** the same scalars applied to the
-    target's own reference epoch.
-
-    Both halves matter. The template alone (see
-    ``predict_cross_fitted_reference_residual_mean_templates``) is ECG-free by
-    construction, so subtracting only it leaves each beat's volume-conducted
-    cardiac field in the output: on real recordings about half of the
-    heartbeat-locked amplitude within 40 ms of the R peak stayed in the file,
-    which the ECG-regressed report metrics cannot see. Adding the projection
-    removes it. It is still not leakage: the scalars come from training beats
-    only, and the reference channel is never corrected, so no EEG sample the
-    call later subtracts from enters its own estimate.
-    """
-    epochs = _validate_epochs(eeg_epochs)
-    reference = _validate_reference_epochs(reference_epochs, epochs.shape)
-    eligible = _validate_training_mask(training_mask, epochs.shape[0])
-
-    predictions = np.empty_like(epochs)
-    cache: dict[bytes, tuple[np.ndarray, np.ndarray, float]] = {}
-    for target_index, target_eligibility in enumerate(eligible):
-        training_indices = np.flatnonzero(target_eligibility)
-        if training_indices.size == 0:
-            raise AdaptiveInputError(
-                "training_mask leaves no eligible mean-template beats"
-            )
-        cache_key = training_indices.tobytes()
-        fitted = cache.get(cache_key)
-        if fitted is None:
-            fitted = _reference_residual_template(
-                epochs[training_indices],
-                reference[training_indices],
-            )
-            cache[cache_key] = fitted
-        template, scales, centre = fitted
-        predictions[target_index] = (
-            template + scales[:, np.newaxis] * (reference[target_index] - centre)
-        )
-    return predictions
-
-
-def _reference_residual_template(
-    training: np.ndarray,
-    reference: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Fit the reference projection on training beats; average the residual.
-
-    Returns the zero-mean-per-epoch residual template, the per-channel
-    projection scalars, and the reference centre those scalars were fitted
-    around, so the projection can be evaluated on a beat that was not trained
-    on.
-    """
-    channel_count = training.shape[1]
-    flattened = training.transpose(1, 0, 2).reshape(channel_count, -1)
-    flat_reference = reference.reshape(-1)
-    centre = float(np.median(flat_reference))
-    centred = flat_reference - centre
-    energy = float(np.dot(centred, centred))
-    if energy == 0.0:
-        scales = np.zeros(channel_count, dtype=np.float64)
-    else:
-        row_centre = flattened - np.median(flattened, axis=1, keepdims=True)
-        scales = np.einsum("ij,j->i", row_centre, centred) / energy
-    residual = flattened - scales[:, np.newaxis] * centred
-    residual_epochs = residual.reshape(
-        channel_count, training.shape[0], training.shape[2]
-    ).transpose(1, 0, 2)
-    residual_epochs -= residual_epochs.mean(axis=2, keepdims=True)
-    return residual_epochs.mean(axis=0), scales, centre
-
-
-def _validate_reference_epochs(
-    reference_epochs: npt.ArrayLike,
-    epoch_shape: tuple[int, ...],
-) -> np.ndarray:
-    reference = np.asarray(reference_epochs)
-    if (
-        reference.ndim != 2
-        or reference.shape != (epoch_shape[0], epoch_shape[2])
-        or np.issubdtype(reference.dtype, np.bool_)
-        or not np.issubdtype(reference.dtype, np.number)
-    ):
-        raise AdaptiveInputError(
-            "reference_epochs must contain one numeric trace per EEG epoch"
-        )
-    reference = reference.astype(np.float64, copy=False)
-    if not np.all(np.isfinite(reference)):
-        raise AdaptiveInputError("reference_epochs must be finite")
-    return reference
 
 
 def predict_cross_fitted_median_templates(
@@ -947,21 +734,6 @@ def _validate_training_mask(
     return mask.astype(bool, copy=False)
 
 
-def _validate_objectives(values: npt.ArrayLike, *, name: str) -> np.ndarray:
-    objectives = np.asarray(values)
-    if objectives.ndim != 1 or objectives.size == 0:
-        raise AdaptiveInputError(f"{name} must be a nonempty vector")
-    if np.issubdtype(objectives.dtype, np.bool_) or not np.issubdtype(
-        objectives.dtype,
-        np.number,
-    ):
-        raise AdaptiveInputError(f"{name} must contain finite numbers")
-    objectives = objectives.astype(np.float64, copy=False)
-    if not np.all(np.isfinite(objectives)):
-        raise AdaptiveInputError(f"{name} must contain finite numbers")
-    return objectives
-
-
 def _validate_neighbor_count(neighbor_count: int, beat_count: int) -> int:
     if (
         isinstance(neighbor_count, bool)
@@ -1087,7 +859,6 @@ def _validate_sampling_rate(sampling_rate_hz: float) -> float:
     if sampling_rate_hz <= 0.0:
         raise AdaptiveInputError("sampling_rate_hz must be positive")
     return float(sampling_rate_hz)
-
 
 
 def _window_offsets(

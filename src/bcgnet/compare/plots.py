@@ -1,6 +1,4 @@
-"""Raw vs corrected-arm overlays and the per-recording metrics row."""
-
-from __future__ import annotations
+"""Rectangular, symmetric exports from the same profiles used by the figures."""
 
 from pathlib import Path
 
@@ -8,40 +6,20 @@ import mne
 import numpy as np
 from scipy.signal import welch
 
-from .arms import BCGNET, CLEAN_ARMS, COMPARATOR_ARMS
-from .pairs import RecordingSet
-from .qc import (
-    alpha_peak_height,
-    load_shared_detector_provenance,
-    median_locked_ratio,
-    method_qc_flags,
-    removal_profile,
-)
+from bcg_correction.correction_report import compute_correction_profile, profile_metrics
+from bcg_correction.evaluation import EvaluationSettings, band_integral
+
+from .arms import CLEAN_ARMS, COMPARATOR_ARMS
+from .qc import alpha_peak_height, load_shared_detector_provenance
 
 RAW_LABEL = "Raw"
-
-_BANDS = {
-    "delta": (0.5, 4.0),
-    "theta": (4.0, 8.0),
-    "alpha": (8.0, 13.0),
-}
-
-_PROFILE_METRICS = (
-    "specificity",
-    "alpha_collateral_fraction",
-    "locked_removed_uv",
-    "collateral_uv",
-)
-_FLAG_COLUMNS = (
-    "bcgnet_adds_power",
-    "bcgnet_locked_worse_than_raw",
-    "alpha_peak_collapsed",
-    "prefer_comparator",
-)
+_BANDS = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 13)}
+_VARIANTS = ("as_written", "ecg_regressed")
+_PROFILE_SCALARS = ("locked_removal_fraction", "variable_removal_alpha_ratio")
 
 
-def _metric_columns() -> tuple[str, ...]:
-    columns = ["bids_id", "stem", "label", "run"]
+def metric_columns(evaluation: EvaluationSettings):
+    columns = ["bids_id", "stem", "label", "run", "evaluation_scope"]
     columns.extend(f"has_{arm.key}" for arm in CLEAN_ARMS)
     columns.append("rms_raw")
     for band in _BANDS:
@@ -50,47 +28,55 @@ def _metric_columns() -> tuple[str, ...]:
             columns.extend((f"{band}_{arm.key}", f"{band}_{arm.key}_ratio"))
     columns.append("alpha_peak_raw")
     for arm in CLEAN_ARMS:
-        columns.extend((f"rms_{arm.key}", f"alpha_peak_{arm.key}"))
-    for arm in CLEAN_ARMS:
-        columns.append(f"locked_{arm.key}_ratio")
-        columns.extend(f"{name}_{arm.key}" for name in _PROFILE_METRICS)
-    columns.extend(_FLAG_COLUMNS)
+        columns.extend(
+            f"{name}_{arm.key}"
+            for name in (
+                "rms",
+                "alpha_peak",
+                "evaluation_status",
+                "preservation_status",
+                "beats",
+                "gap_fraction",
+                *_PROFILE_SCALARS,
+            )
+        )
+        for count in evaluation.block_counts:
+            columns.append(f"local_{count}_minimum_beats_{arm.key}")
+            for variant in _VARIANTS:
+                columns.extend(
+                    f"local_{count}_{variant}_{name}_{arm.key}"
+                    for name in ("before_uv", "after_uv", "ratio")
+                )
     return tuple(columns)
 
 
-METRIC_COLUMNS = _metric_columns()
-
-
-def load_fastr(path: Path) -> mne.io.BaseRaw:
+def load_fastr(path: Path):
     return mne.io.read_raw_brainvision(path, preload=True, verbose="ERROR")
 
 
-def _eeg_indices(raw: mne.io.BaseRaw) -> np.ndarray:
-    names = raw.ch_names
-    if "ECG" in names:
-        return np.array(
-            [index for index, name in enumerate(names) if name != "ECG"]
-        )
-    return np.arange(len(names))
+def _eeg_indices(raw):
+    return [
+        index
+        for index in mne.pick_types(raw.info, eeg=True, exclude=[])
+        if raw.ch_names[index] != "ECG"
+    ]
 
 
-def mean_eeg_psd(
-    raw: mne.io.BaseRaw, *, max_hz: float
-) -> tuple[np.ndarray, np.ndarray]:
+def mean_eeg_psd(raw, *, max_hz):
     data = raw.get_data(picks=_eeg_indices(raw)) * 1e6
     fs = float(raw.info["sfreq"])
-    nperseg = min(int(fs * 3), data.shape[1])
-    freqs, pxx = welch(data, fs=fs, nperseg=nperseg, axis=1)
-    keep = freqs <= max_hz
-    return freqs[keep], np.mean(pxx[:, keep], axis=0)
+    frequency, power = welch(
+        data, fs=fs, nperseg=min(int(fs * 3), data.shape[1]), axis=-1
+    )
+    keep = frequency <= max_hz
+    return frequency[keep], power[:, keep].mean(axis=0)
 
 
-def band_power(freqs: np.ndarray, pxx: np.ndarray, low: float, high: float) -> float:
-    mask = (freqs >= low) & (freqs <= high)
-    return float(np.sum(pxx[mask]))
+def band_power(frequency, power, low, high):
+    return float(band_integral(frequency, power, low, high))
 
 
-def detector_provenance(recording: RecordingSet):
+def detector_provenance(recording):
     return load_shared_detector_provenance(
         {
             arm.key: recording.cleaned_vhdr[arm.key]
@@ -100,97 +86,104 @@ def detector_provenance(recording: RecordingSet):
     )
 
 
-def metrics_row(
-    recording: RecordingSet,
-    traces: dict[str, mne.io.BaseRaw],
-    *,
-    max_hz: float,
-) -> dict[str, object]:
-    row: dict[str, object] = {
-        "bids_id": recording.bids_id,
-        "stem": recording.stem,
-        "label": recording.label,
-        "run": recording.run,
-    }
+def measure_recording(recording, traces, evaluation):
+    provenance = detector_provenance(recording)
+    if provenance is None:
+        return {}
+    raw = traces[RAW_LABEL]
+    if "ECG" not in raw.ch_names:
+        raise ValueError("comparison requires the original ECG channel")
+    expected_eeg = [i for i in range(len(raw.ch_names)) if raw.ch_names[i] != "ECG"]
+    if list(_eeg_indices(raw)) != expected_eeg:
+        raise ValueError("comparison inputs must contain only EEG and the ECG channel")
+    profiles = {}
     for arm in CLEAN_ARMS:
-        row[f"has_{arm.key}"] = arm.label in traces
+        if arm.label not in traces:
+            continue
+        cleaned = traces[arm.label]
+        if (
+            cleaned.ch_names != raw.ch_names
+            or cleaned.n_times != raw.n_times
+            or cleaned.info["sfreq"] != raw.info["sfreq"]
+        ):
+            raise ValueError(f"unaligned comparison input: {arm.label}")
+        profile = compute_correction_profile(
+            raw.get_data(),
+            cleaned.get_data(),
+            tuple(raw.ch_names),
+            ecg_channel_index=raw.ch_names.index("ECG"),
+            peak_samples=provenance.peak_samples,
+            sampling_rate_hz=float(raw.info["sfreq"]),
+            delay_seconds=provenance.delay_seconds,
+            window_seconds=provenance.window_seconds,
+            gap_fraction=provenance.gap_fraction,
+            method=arm.key,
+            label=recording.stem,
+            subject=recording.bids_id,
+            evaluation=evaluation,
+        )
+        if profile is not None:
+            profiles[arm.key] = profile
+    return profiles
 
-    psds = {
-        name: mean_eeg_psd(raw, max_hz=max_hz) for name, raw in traces.items()
-    }
-    raw_f, raw_p = psds[RAW_LABEL]
-    row["rms_raw"] = float(
-        np.sqrt(np.mean(np.square(traces[RAW_LABEL].get_data() * 1e6)))
+
+def _finite(value):
+    return float(value) if value is not None and np.isfinite(value) else None
+
+
+def metrics_row(recording, traces, profiles, *, max_hz, evaluation):
+    row = dict.fromkeys(metric_columns(evaluation))
+    row.update(
+        bids_id=recording.bids_id,
+        stem=recording.stem,
+        label=recording.label,
+        run=recording.run,
+        evaluation_scope="saved_outputs_descriptive_not_independent_validation",
     )
-
-    remaining: dict[str, float | None] = {}
+    psds = {name: mean_eeg_psd(raw, max_hz=max_hz) for name, raw in traces.items()}
+    raw_frequency, raw_power = psds[RAW_LABEL]
+    raw = traces[RAW_LABEL]
+    row["rms_raw"] = float(
+        np.sqrt(np.mean(raw.get_data(picks=_eeg_indices(raw)) ** 2)) * 1e6
+    )
+    row["alpha_peak_raw"] = alpha_peak_height(raw_frequency, raw_power)
     for band, (low, high) in _BANDS.items():
-        raw_band = band_power(raw_f, raw_p, low, high)
-        row[f"{band}_raw"] = raw_band
+        original = band_power(raw_frequency, raw_power, low, high)
+        row[f"{band}_raw"] = _finite(original)
         for arm in CLEAN_ARMS:
-            value = None
-            ratio = None
             if arm.label in psds:
                 value = band_power(*psds[arm.label], low, high)
-                ratio = value / raw_band if raw_band else None
-            row[f"{band}_{arm.key}"] = value
-            row[f"{band}_{arm.key}_ratio"] = ratio
-            if arm is BCGNET:
-                remaining[band] = ratio
-
-    alpha_raw = alpha_peak_height(raw_f, raw_p)
-    row["alpha_peak_raw"] = alpha_raw
-    alpha_net = None
+                row[f"{band}_{arm.key}"] = _finite(value)
+                row[f"{band}_{arm.key}_ratio"] = (
+                    _finite(value / original) if original > 0 else None
+                )
     for arm in CLEAN_ARMS:
-        rms = None
-        peak = None
-        if arm.label in traces:
-            rms = float(
-                np.sqrt(np.mean(np.square(traces[arm.label].get_data() * 1e6)))
-            )
-            peak = alpha_peak_height(*psds[arm.label])
-        row[f"rms_{arm.key}"] = rms
-        row[f"alpha_peak_{arm.key}"] = peak
-        if arm is BCGNET:
-            alpha_net = peak
-
-    provenance = detector_provenance(recording)
-    for arm in CLEAN_ARMS:
-        ratio = None
-        if provenance is not None and arm.label in traces:
-            ratio = median_locked_ratio(
-                traces[RAW_LABEL],
-                traces[arm.label],
-                peak_samples=provenance.peak_samples,
-                delay_seconds=provenance.delay_seconds,
-                window_seconds=provenance.window_seconds,
-            )
-        row[f"locked_{arm.key}_ratio"] = ratio
-        profile: dict[str, float | None] = {
-            "specificity": None,
-            "alpha_collateral_fraction": None,
-            "locked_removed_uv": None,
-            "collateral_uv": None,
-        }
-        if provenance is not None and arm.label in traces:
-            profile = removal_profile(
-                traces[RAW_LABEL],
-                traces[arm.label],
-                peak_samples=provenance.peak_samples,
-                delay_seconds=provenance.delay_seconds,
-                window_seconds=provenance.window_seconds,
-            )
-        for name, value in profile.items():
-            row[f"{name}_{arm.key}"] = value
-
-    row.update(
-        method_qc_flags(
-            remaining_ratios=remaining,
-            locked_ratio=row[f"locked_{BCGNET.key}_ratio"],
-            alpha_peak_raw=alpha_raw,
-            alpha_peak_bcgnet=alpha_net,
+        present = arm.label in traces
+        row[f"has_{arm.key}"] = present
+        row[f"evaluation_status_{arm.key}"] = (
+            "not_available" if present else "missing_output"
         )
-    )
-    if tuple(row) != METRIC_COLUMNS:
-        raise RuntimeError("comparison metric row does not match its declared schema")
+        row[f"preservation_status_{arm.key}"] = "not_measured"
+        if present:
+            data = traces[arm.label].get_data(picks=_eeg_indices(traces[arm.label]))
+            row[f"rms_{arm.key}"] = float(np.sqrt(np.mean(data**2)) * 1e6)
+            row[f"alpha_peak_{arm.key}"] = alpha_peak_height(*psds[arm.label])
+        if arm.key not in profiles:
+            continue
+        profile = profiles[arm.key]
+        if (
+            tuple(profile.block_counts) != evaluation.block_counts
+            or profile.minimum_beats_per_block != evaluation.minimum_beats_per_block
+        ):
+            raise ValueError("profile evaluation settings differ from export settings")
+        available = np.isfinite(profile.local_ratio)
+        row[f"evaluation_status_{arm.key}"] = (
+            "available"
+            if available.all()
+            else "partial"
+            if available.any()
+            else "insufficient_beats_or_zero_reference"
+        )
+        for name, value in profile_metrics(profile).items():
+            row[f"{name}_{arm.key}"] = value
     return row

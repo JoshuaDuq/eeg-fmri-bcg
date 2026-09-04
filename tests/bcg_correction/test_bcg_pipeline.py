@@ -9,7 +9,6 @@ import yaml
 from pybv import write_brainvision
 
 import bcg_correction.bcg_pipeline as bcg_pipeline_module
-from bcg_correction.bcg import BcgInputError
 from bcg_correction.bcg_config import load_correction_config
 from bcg_correction.bcg_pipeline import run_bcg_correction
 from bcg_correction.brainvision import (
@@ -97,9 +96,7 @@ def _write_long_recording(tmp_path: Path, *, n_beats: int = 14) -> Path:
     return tmp_path / "long.vhdr"
 
 
-def _correction_yaml(
-    tmp_path: Path, source_vhdr: Path, *, method: str = "aas"
-) -> Path:
+def _correction_yaml(tmp_path: Path, source_vhdr: Path, *, method: str = "aas") -> Path:
     document = {
         "input": {"vhdr": str(source_vhdr)},
         "output": {"vhdr": str(tmp_path / "corrected.vhdr")},
@@ -109,9 +106,10 @@ def _correction_yaml(
             "ecg_to_bcg_delay_seconds": 0.21,
             "aas_neighbor_count": 2,
             "pca_obs_components": 1,
-            "cross_fit_fold_count": 2,
-            "maximum_residual_ratio": 0.75,
-            "residual_floor_uv": 0.0,
+            "evaluation": {
+                "block_counts": [2, 5, 10, 20],
+                "minimum_beats_per_block": 8,
+            },
             "maximum_gap_fraction": 0.05,
         },
         "detector": {
@@ -336,64 +334,41 @@ def test_dominant_gap_burden_writes_no_output(
     with pytest.raises(CardiacInputError, match=r"RR gaps cover 29\.83%"):
         run_bcg_correction(config)
 
-    assert all(not path.exists() for path in bcg_pipeline_module._output_paths(
-        config.output_vhdr.expanduser().resolve()
-    ).values())
+    assert all(
+        not path.exists()
+        for path in bcg_pipeline_module._output_paths(
+            config.output_vhdr.expanduser().resolve()
+        ).values()
+    )
 
 
-def test_residual_floor_admits_a_small_absolute_residual(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ratio over the cap still passes while the absolute residual is tiny.
-
-    The ratio is scale-free: a recording that began with little locked energy
-    cannot halve it however well the correction ran.
-    """
-    source_vhdr = _write_recording(tmp_path)
-    yaml_path = _correction_yaml(tmp_path, source_vhdr)
-    document = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    document["correction"]["maximum_residual_ratio"] = 1e-6   # impossible ratio
-    document["correction"]["residual_floor_uv"] = 1e6         # but floor forgives
-    yaml_path.write_text(yaml.safe_dump(document), encoding="utf-8")
-    config = load_correction_config(yaml_path)
-
+def test_residual_evaluation_is_not_an_output_acceptance_gate(tmp_path):
+    source = _write_recording(tmp_path)
+    config = load_correction_config(_correction_yaml(tmp_path, source))
     summary = run_bcg_correction(config)
-
     provenance = json.loads(summary.provenance_json.read_text())
-    assert provenance["residual_qc"]["ratio"] > 1e-6
-    assert provenance["residual_qc"]["residual_floor_uv"] == pytest.approx(1e6)
-
-
-def test_residual_floor_of_zero_keeps_the_ratio_absolute(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A zero floor reproduces the old ratio-only behaviour."""
-    source_vhdr = _write_recording(tmp_path)
-    yaml_path = _correction_yaml(tmp_path, source_vhdr)
-    document = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    document["correction"]["maximum_residual_ratio"] = 1e-6
-    document["correction"]["residual_floor_uv"] = 0.0
-    yaml_path.write_text(yaml.safe_dump(document), encoding="utf-8")
-    config = load_correction_config(yaml_path)
-
-    with pytest.raises(BcgInputError, match=r"exceeds maximum"):
-        run_bcg_correction(config)
+    assert summary.output_vhdr.is_file()
+    assert (
+        provenance["residual_qc"]["status"] == "descriptive_only_not_an_acceptance_gate"
+    )
+    assert provenance["residual_qc"]["preservation_status"] == "not_measured"
 
 
 def test_correction_writes_a_report_figure(tmp_path: Path) -> None:
-    """Every corrected recording gets its six-panel diagnostic page."""
+    """Every corrected recording gets residual, spectra, and ratio pages."""
+    from bcg_correction.correction_report import report_page_paths
+
     source_vhdr = _write_long_recording(tmp_path)
     config = load_correction_config(_correction_yaml(tmp_path, source_vhdr))
 
     summary = run_bcg_correction(config)
 
-    report = bcg_pipeline_module._output_paths(
-        summary.output_vhdr
-    )["report"]
-    assert report.is_file()
-    assert report.stat().st_size > 10_000
+    report = bcg_pipeline_module._output_paths(summary.output_vhdr)["report"]
+    pages = report_page_paths(report)
+    assert pages.keys() == {"residual", "spectra", "ratios"}
+    for page in pages.values():
+        assert page.is_file()
+        assert page.stat().st_size > 10_000
 
 
 def test_report_metrics_match_the_provenance_ratio(tmp_path: Path) -> None:
@@ -419,11 +394,19 @@ def test_report_metrics_match_the_provenance_ratio(tmp_path: Path) -> None:
         window_seconds=tuple(provenance["window_seconds"]),
         gap_fraction=provenance["rr_gap_fraction"],
         method=provenance["method"],
+        evaluation=config.evaluation,
     )
     assert profile is not None
-    assert profile.locked_ratio == pytest.approx(
-        provenance["residual_qc"]["ratio"], rel=1e-6
-    )
+    assert profile.preservation_status == "not_measured"
+    assert tuple(profile.block_counts) == config.evaluation.block_counts
+    from bcg_correction.correction_report import profile_metrics
+
+    for key, value in profile_metrics(profile).items():
+        saved = provenance["residual_qc"]["metrics"][key]
+        if isinstance(value, float):
+            assert value == pytest.approx(saved, rel=2e-5, abs=1e-10)
+        else:
+            assert value == saved
 
 
 def test_ok_detection_writes_no_bad_bcg_markers(tmp_path: Path) -> None:
@@ -469,26 +452,21 @@ def test_run_bcg_correction_preserves_ecg_and_writes_pulse_markers(
     assert pulse_count == summary.marker_count
 
     provenance = json.loads(summary.provenance_json.read_text(encoding="utf-8"))
-    assert provenance["residual_qc"]["ratio"] <= 0.75
-
-
-def test_bcg_correction_refuses_excessive_residual_before_writing(
-    tmp_path: Path,
-) -> None:
-    source_vhdr = _write_recording(tmp_path)
-    config_path = _correction_yaml(tmp_path, source_vhdr)
-    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    document["correction"]["maximum_residual_ratio"] = 1e-6
-    config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
-    config = load_correction_config(config_path)
-
-    with pytest.raises(BcgInputError, match="residual ratio"):
-        run_bcg_correction(config)
-
-    output_paths = bcg_pipeline_module._output_paths(
-        config.output_vhdr.expanduser().resolve()
+    assert (
+        provenance["residual_qc"]["status"] == "descriptive_only_not_an_acceptance_gate"
     )
-    assert all(not path.exists() for path in output_paths.values())
+
+
+def test_old_residual_acceptance_threshold_is_rejected(tmp_path):
+    from bcg_correction.config import ConfigurationError
+
+    source = _write_recording(tmp_path)
+    path = _correction_yaml(tmp_path, source)
+    document = yaml.safe_load(path.read_text())
+    document["correction"]["maximum_residual_ratio"] = 0.5
+    path.write_text(yaml.safe_dump(document))
+    with pytest.raises(ConfigurationError, match="maximum_residual_ratio"):
+        load_correction_config(path)
 
 
 def test_correct_bcg_cli_executes_yaml_pipeline(tmp_path: Path, capsys) -> None:
@@ -517,18 +495,23 @@ def test_profile_round_trips_and_aggregates(tmp_path: Path) -> None:
     assert stored.is_file()
 
     profile = read_profile(stored)
-    assert profile.locked_ratio == pytest.approx(
-        json.loads(summary.provenance_json.read_text())["residual_qc"]["ratio"],
-        rel=1e-6,
-    )
+    assert profile.preservation_status == "not_measured"
+    assert tuple(profile.block_counts) == config.evaluation.block_counts
     round_trip = tmp_path / "again.npz"
     write_profile(profile, round_trip)
     again = read_profile(round_trip)
-    np.testing.assert_allclose(again.template_before, profile.template_before)
+    np.testing.assert_allclose(again.local_ratio, profile.local_ratio)
 
     page = tmp_path / "aggregate.png"
-    assert save_aggregate_report([profile, profile], title="two", output=page)
-    assert page.stat().st_size > 10_000
+    from dataclasses import replace
+
+    from bcg_correction.correction_report import report_page_paths
+
+    assert save_aggregate_report(
+        [profile, replace(profile, label="second")], title="two", output=page
+    )
+    pages = report_page_paths(page)
+    assert all(path.stat().st_size > 10_000 for path in pages.values())
 
 
 def test_profile_without_schema_version_is_rejected(tmp_path: Path) -> None:
@@ -549,17 +532,15 @@ def test_aggregate_report_declines_an_empty_list(tmp_path: Path) -> None:
 
 def test_provenance_records_every_method_parameter(tmp_path: Path) -> None:
     """A correction that cannot be reproduced from its own sidecar is not
-    provenance. Every arm's shape parameter has to be recorded, including the
-    fold count that decides what ``blocked_mean`` subtracts."""
+    provenance. Every arm's shape parameter has to be recorded."""
     source_vhdr = _write_recording(tmp_path)
     config = load_correction_config(
-        _correction_yaml(tmp_path, source_vhdr, method="blocked_mean")
+        _correction_yaml(tmp_path, source_vhdr, method="aas")
     )
 
     summary = run_bcg_correction(config)
 
     provenance = json.loads(summary.provenance_json.read_text())
-    assert provenance["method"] == "blocked_mean"
-    for key in ("aas_neighbor_count", "pca_obs_components", "cross_fit_fold_count"):
+    assert provenance["method"] == "aas"
+    for key in ("aas_neighbor_count", "pca_obs_components"):
         assert key in provenance, key
-    assert provenance["cross_fit_fold_count"] == config.cross_fit_fold_count

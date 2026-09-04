@@ -4,49 +4,64 @@ A scientific computing framework for the standardized correction and comparative
 
 ## Overview
 
-Cardiovascular pulsatile activity inside high-field magnetic resonance scanners induces large-amplitude ballistocardiogram (BCG) artifacts on scalp electroencephalography. This software provides an integrated pipeline to benchmark and execute four correction methodologies under standardized physiological constraints:
+Cardiovascular pulsatile activity inside high-field magnetic resonance scanners induces large-amplitude ballistocardiogram (BCG) artifacts on scalp electroencephalography. This software provides an integrated pipeline to benchmark and execute three correction methodologies under standardized physiological constraints:
 
 1. **Average Artifact Subtraction (AAS)**: Moving-window sliding template subtraction aligned to detected electrocardiographic R-peaks (Allen et al., 1998).
 2. **Principal Component Analysis Optimal Basis Set (PCA-OBS)**: Subspace projection onto principal components derived from cardiac-aligned artifact templates (Niazy et al., 2005).
-3. **Cross-Fitted Blocked Mean**: Contiguous non-overlapping block cross-fitting with beat-invariant temporal templates.
-4. **BCGNet (Recurrent Neural Network)**: Deep gated recurrent unit (GRU) network trained directly on single-lead electrocardiography (ECG) to predict multi-channel BCG artifacts without requiring cardiac peak markers (McIntosh et al., 2020).
+3. **BCGNet (Recurrent Neural Network)**: Deep gated recurrent unit (GRU) network trained directly on single-lead electrocardiography (ECG) to predict multi-channel BCG artifacts without requiring cardiac peak markers (McIntosh et al., 2020).
 
 No single method is treated as a default. Study pipelines evaluate each arm under unified validation criteria using `bcg compare`.
 
 ---
 
-## Empirical Benchmark & Comparative Evaluation
+## Comparative evaluation
 
-Artifact suppression cannot be evaluated purely by total residual variance or broadband power reduction. An overly aggressive filter or over-subtracting template can artificially minimize residual variance by attenuating endogenous neural oscillations. To address this, corrections are evaluated using two joint criteria:
-- **Heartbeat-Locked Residual Ratio**: The fraction of cardiac-locked energy remaining post-correction (lower indicates greater artifact removal).
-- **Spectral Specificity & Collateral Loss**: The fraction of removed signal that is phase-locked to cardiac cycles. Power removed outside cardiac harmonics—particularly in the physiological alpha band (8–13 Hz)—represents unintended loss of neural activity.
+Suppression alone is not correction quality. The comparison uses identical
+recordings, ECG events, windows, and EEG channels for every available arm.
 
-### Cohort Comparison
+- **Local heartbeat-locked RMS:** chronological equal-beat blocks are averaged
+  separately, squared, and weighted by their beat counts before taking RMS.
+  Per-channel amplitudes are summarized by their median. Ratios are amplitude
+  ratios, not fractions of artifact energy.
+- **Several resolutions:** the shipped configuration uses 2, 5, 10, and 20
+  blocks, each requiring at least eight beats. These are exploratory
+  sensitivity scales, not optimized settings or independent validation folds.
+  Insufficiently supported scales are unavailable; zero reference amplitudes
+  produce undefined ratios, not perfect scores.
+- **Saved EEG and ECG-regressed sensitivity:** all EEG channels are evaluated.
+  ECG is excluded from EEG RMS and spectra. The original ECG is the same
+  regression reference for before and after.
+- **Removal diagnostics:** heartbeat-locked removal fraction and beat-variable
+  alpha removal describe what changed. Neither identifies artifact purity or
+  neural loss. Variable BCG and heartbeat-evoked neural activity invalidate
+  those interpretations.
+- **Paired participant summaries:** recordings are intersected across the arms
+  being compared before averaging within each participant. Cohort figures show
+  participant medians; residual error bars show participant IQR, not confidence
+  intervals. Missing output coverage is shown separately.
 
-The comparative report below evaluates **129 paired acquisitions across 21 participants** under identical cardiac peak alignments:
+The same six panels serve recording, subject, cohort, and comparison reports:
+pooled template RMS (cancellation-prone diagnostic), local RMS, multiscale
+residual ratios, beat-variable removal spectra, removal phase-locking
+specificity, and coverage/limitations. Topographies show local residuals on a
+shared scale per resolution and descriptive variable-alpha removal.
 
-![Comparative Report across 129 Paired EEG-fMRI Recordings](docs/figures/cohort_comparative.png)
+There is **no automatic preferred method**, no power-reduction quality verdict,
+and no residual-based output rejection threshold. Detector and gap safeguards
+remain. Neural preservation is explicitly `not_measured`; matched known-signal
+validation or independent task endpoints are needed to establish it. Freezing
+BCGNet while refitting the other methods is not a matched preservation test.
 
-*Figure 1: Cohort comparative report across 129 paired recordings (21 subjects). (A) Heartbeat-locked waveform average before and after correction. (B) Residual waveform on an independent amplitude scale. (C) Posterior channel power spectral density (PSD); vertical ticks mark cardiac harmonics, shaded area indicates the alpha band (8–13 Hz). (D) Non-cardiac-locked power removed (collateral loss). (E) Spectral specificity across frequencies (cardiac-locked fraction of removed power). (F) Per-recording metric distributions.*
+The previous pooled-metric rankings and figures are not evidence under this
+revised evaluation. Rebuild using existing FASTR and corrected EEG:
 
-### Scalp Topographies
+```bash
+uv run bcg reports --config compare.yaml
+```
 
-Scalp topographies evaluate spatial selectivity across all 63 channels. BCG artifacts are primarily peripheral and head-motion-driven, whereas physiological alpha rhythms originate predominantly from occipital and parietal cortices.
-
-![Scalp Topographies of Artifact Removal and Collateral Loss](docs/figures/cohort_topography.png)
-
-*Figure 2: Cohort scalp topographies. Row A: Baseline cardiac-locked amplitude and the corresponding locked amplitude removed by each method on a shared scale. Row B: Baseline alpha-band power and the non-locked alpha power removed as collateral loss. Topographical similarity between baseline alpha and collateral loss denotes neural signal attenuation.*
-
-### Summary of Cohort Performance
-
-| Method | Heartbeat-Locked Ratio (ECG-Regressed) | Spectral Specificity | Alpha Collateral Loss (%) |
-| :--- | :---: | :---: | :---: |
-| **AAS** | 0.33 | 0.86 | 8.8% |
-| **PCA-OBS** | 0.27 | 0.72 | 12.4% |
-| **Blocked Mean** | 0.26 | 0.98 | 0.5% |
-| **BCGNet** | 0.30 | 0.70 | 15.6% |
-
-*Median metrics across 129 paired recordings. Lower locked ratios indicate greater artifact attenuation; higher specificity and lower collateral loss indicate preservation of endogenous neural rhythms.*
+This updates profiles and plots without training or applying any correction.
+Schema-v1 profiles are rejected with rebuild instructions, not silently reused.
+See [measurement definitions and limitations](docs/bcg_methods.md#metrics-and-scientific-limits).
 
 ---
 
@@ -73,13 +88,12 @@ uv run bcg discover --config config.yaml
 # 2. Execute desired correction pipelines
 uv run bcg aas          --config compare.yaml
 uv run bcg pca-obs      --config compare.yaml
-uv run bcg blocked-mean --config compare.yaml
 uv run bcg bcgnet       --config config.yaml
 
 # 3. Generate comparative evaluation tables and figures
 uv run bcg compare --config compare.yaml
 
-# 4. Rebuild figures from serialized profiles without re-running corrections
+# 4. Recompute profiles and figures from saved EEG, without re-running corrections
 uv run bcg reports --config compare.yaml
 ```
 
@@ -95,10 +109,9 @@ uv run bcg correct --config examples/bcg_correction.yml
 | `bcg discover` | `config.yaml` | Identifies available BIDS recordings and displays subject/run tables. |
 | `bcg aas` | `compare.yaml` | Writes `*_fastr_aas.vhdr` and per-recording profiles under `paths.aas_root`. |
 | `bcg pca-obs` | `compare.yaml` | Writes `*_fastr_pcaobs.vhdr` and per-recording profiles under `paths.pca_obs_root`. |
-| `bcg blocked-mean` | `compare.yaml` | Writes `*_fastr_blockedmean.vhdr` and profiles under `paths.blocked_mean_root`. |
 | `bcg bcgnet` | `config.yaml` | Trains subject GRU models; writes `*_fastr_bcgnet.vhdr` and `cohort_summary.csv`. |
 | `bcg compare` | `compare.yaml` | Generates `compare_summary.csv`, comparative figures, and topographies. |
-| `bcg reports` | `compare.yaml` | Rebuilds cohort figures directly from existing `*_profile.npz` archives. |
+| `bcg reports` | `compare.yaml` | Recomputes profiles from saved EEG, then builds subject/cohort figures from profiles. |
 | `bcg detect` | `compare.yaml` | Executes independent QRS detection on ECG channels. |
 | `bcg benchmark` | `compare.yaml` | Computes signal transfer on synthetic calibration injections. |
 
@@ -115,7 +128,7 @@ The repository enforces clean separation of concerns:
 
 ### Key Processing Standards
 
-1. **Non-destructive File Operations**: Corrected BrainVision datasets (`.vhdr`, `.eeg`, `.vmrk`) are written to separate output directories with explicit method suffixes (`_aas`, `_pcaobs`, `_blockedmean`, `_bcgnet`). Raw and FASTR gradient-corrected inputs are never overwritten.
+1. **Non-destructive File Operations**: Corrected BrainVision datasets (`.vhdr`, `.eeg`, `.vmrk`) are written to separate output directories with explicit method suffixes (`_aas`, `_pcaobs`, `_bcgnet`). Raw and FASTR gradient-corrected inputs are never overwritten.
 2. **Frequency Domain Alignment**: Bounded methods operate at native acquisition sampling rates (e.g., 1000 Hz). BCGNet trains on downsampled 100 Hz data and maps predicted BCG traces back to 1000 Hz via polyphase sinc interpolation prior to subtraction, preserving non-cardiac high frequencies.
 3. **RR Interval Validation**: Heartbeat intervals below physiological limits ($RR < \text{minimum}$) indicate false detections and abort processing to prevent artifact injection. Prolonged intervals ($RR > \text{maximum}$) indicate missed beats and are annotated with `Bad_BCG` markers without subtracting unanchored templates.
 
@@ -139,7 +152,7 @@ uv run pytest
 uv run ruff check src tests tools
 ```
 
-All 393 unit and integration tests must pass cleanly.
+All unit and integration tests must pass cleanly.
 
 ---
 

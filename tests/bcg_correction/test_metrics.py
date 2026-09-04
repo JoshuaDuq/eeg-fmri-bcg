@@ -4,12 +4,10 @@ import pytest
 from bcg_correction.metrics import (
     IncrementalTransfer,
     MetricInputError,
-    band_rms_ratio,
     cardiac_locked_rms,
     cardiac_residual_ratio,
     circular_shifted_cardiac_null,
     delay_estimation_eeg,
-    event_locked_rms_ratio,
     held_out_cardiac_rms,
     incremental_signal_transfer,
     is_posterior_eeg_channel,
@@ -116,21 +114,6 @@ def test_tone_transfer_wraps_phase_error_to_the_shortest_rotation() -> None:
     assert transfer.phase_error_degrees == pytest.approx(-170.0, abs=1e-6)
 
 
-def test_band_rms_ratio_measures_retention_inside_the_band_only() -> None:
-    injected = make_tone(30.0, 4.0, 0.0)
-    corrected = 0.5 * injected + make_tone(200.0, 50.0, 0.0)
-
-    ratio = band_rms_ratio(
-        injected,
-        corrected,
-        low=1.0,
-        high=100.0,
-        sampling_rate=SAMPLING_RATE,
-    )
-
-    assert ratio == pytest.approx(0.5, abs=1e-3)
-
-
 def test_trigger_locked_rms_recovers_a_repeating_artifact_amplitude() -> None:
     triggers = np.arange(98) * 200.0 + 50.0
     data = np.zeros((2, SAMPLE_COUNT))
@@ -164,25 +147,6 @@ def test_trigger_locked_rms_averages_away_signal_unrelated_to_triggers() -> None
     locked = trigger_locked_rms(noise, triggers, epoch_samples=200)
 
     assert np.all(locked < 0.2)
-
-
-def test_event_locked_rms_ratio_preserves_fractional_event_transfer() -> None:
-    injected = np.zeros(SAMPLE_COUNT)
-    for start in (100.5, 1_000.5, 1_900.5):
-        positions = np.arange(40, dtype=np.float64) + start
-        injected[np.floor(positions).astype(int)] += np.sin(
-            2.0 * np.pi * (positions - start) / 40.0
-        )
-    corrected = 0.75 * injected
-
-    ratio = event_locked_rms_ratio(
-        injected,
-        corrected,
-        np.array([100.5, 1_000.5, 1_900.5]),
-        epoch_samples=40,
-    )
-
-    assert ratio == pytest.approx(0.75, abs=0.02)
 
 
 def test_held_out_cardiac_rms_uses_opposite_beat_templates() -> None:
@@ -284,9 +248,6 @@ def test_circular_shifted_cardiac_null_is_deterministic_and_unlocked() -> None:
         (lambda: tone_transfer(np.zeros(100), np.zeros(100),
                                frequency=600.0, sampling_rate=SAMPLING_RATE),
          "below the Nyquist"),
-        (lambda: band_rms_ratio(np.zeros(100), np.zeros(100),
-                                low=50.0, high=10.0, sampling_rate=SAMPLING_RATE),
-         "band"),
         (lambda: trigger_locked_rms(np.zeros((2, 100)), np.array([10.0]),
                                     epoch_samples=0),
          "epoch"),

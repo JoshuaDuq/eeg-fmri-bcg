@@ -1,10 +1,9 @@
 # Independent cardiac detection and BCG correction
 
-Library for `src/bcg_correction/` (`bcg aas`, `bcg pca-obs`, `bcg blocked-mean`,
-`bcg correct`). `bcg bcgnet`
-does not call it. Both bounded methods below are study compare arms: AAS writes
-`*_fastr_aas.vhdr`, PCA-OBS writes `*_fastr_pcaobs.vhdr`, and blocked mean writes
-`*_fastr_blockedmean.vhdr`, each under its own root, so no arm overwrites another.
+Library for `src/bcg_correction/` (`bcg aas`, `bcg pca-obs`, `bcg correct`).
+`bcg bcgnet` does not call it. Both bounded methods below are study compare
+arms: AAS writes `*_fastr_aas.vhdr` and PCA-OBS writes `*_fastr_pcaobs.vhdr`,
+each under its own root, so no arm overwrites another.
 
 This stage is independent of BrainVision Analyzer's cardiac markers. It
 accepts FASTR gradient-corrected BrainVision and detects cardiac events from the ECG
@@ -78,18 +77,12 @@ when every interval lies in `[minimum_rr_seconds, maximum_rr_seconds]` and
 study configuration uses `maximum_rr_seconds: 2.0` (30 bpm) so a slightly slow
 but regular train is not treated as a gap.
 
-BCG correction refuses every degraded detector train. This includes any RR
-interval outside the configured range or a low-prominence accepted candidate;
-median RR cannot hide a missed beat. Full overlong RR intervals are represented
-by 0-based half-open `rr_gap_spans` during audit, rather than marking only the
-tail after `maximum_rr_seconds`.
-
-After correction, the pipeline measures posterior, ECG-regressed,
-heartbeat-locked RMS over the corrected window. Output is refused when the
-median after/before ratio exceeds `maximum_residual_ratio`. Successful
-provenance stores the before RMS, after RMS, observed ratio, and threshold in
-`residual_qc`. Both detector and residual failures raise before any `.vhdr`,
-`.eeg`, `.vmrk`, `.bcg.json`, or PSD output exists.
+BCG correction refuses fatal detector problems, including short RR intervals and
+low-prominence candidates. Overlong RR gaps alone are tolerated only within
+`maximum_gap_fraction`; they are annotated as bad intervals. Detector checks
+precede writing. Residual metrics are descriptive and no longer gate acceptance.
+The correction provenance records evaluation settings and measurements; the
+same profile supplies its figures.
 
 ## Correction arms
 
@@ -101,35 +94,6 @@ train:
   pool by epoch correlation, insufficient complete neighbour support is an error, and
   a per-channel least-squares scalar is fitted on constant-detrended epochs.
   A short cosine taper makes the subtraction zero at both window boundaries.
-- Blocked mean splits beats into contiguous folds. For each fold, one scalar
-  per channel regresses the ECG channel out of the beats *outside* the fold, and
-  the mean of what is left is the BCG template. Each beat is then corrected by
-  that template plus the same scalars applied to its own ECG epoch, so the
-  volume-conducted cardiac field leaves with the BCG. Neither the regression nor
-  the template sees EEG that the same call later subtracts from, so activity in
-  one beat cannot cause more to be taken out of that beat; the ECG channel is
-  never corrected, so reading the target's ECG is not leakage.
-  `cross_fit_fold_count` sets the block count; a 2/5/10/20 sweep over 28
-  recordings found suppression flat from five upward, so the shipped ten sits on
-  a plateau.
-
-  Outputs written before 2026-09-01 subtracted the ECG-free template alone,
-  which left each beat's own ECG projection in the EEG. Measured over the 135
-  recordings present in both the pre-fix and post-fix arms, the fix halved the
-  heartbeat-locked residual on the EEG as written (median ratio 0.398 to 0.187,
-  improved on 135 of 135) and cut the locked amplitude within 40 ms of the R
-  peak from 11.40 to 2.74 uV against 17.32 uV uncorrected. Over the same
-  recordings the ECG-regressed ratio moved from 0.249 to 0.264 -- that is, the
-  metric the study had been reading could not see any of it, and moved slightly
-  the wrong way. Pre-fix outputs must be regenerated before they are compared or
-  analysed; one of them was 2.2x worse than no correction at all and still
-  passed the acceptance gate.
-
-  Adding the projection does not change how the arm treats added EEG. The
-  projection depends only on the reference channel, which an injected signal
-  never touches, so it cancels in an incremental-transfer measurement; the fold
-  sweep confirms this, with cosine similarity 0.99908 after the fix against
-  0.99915 before.
 - PCA-OBS delegates the basis construction and per-event fit to MNE-Python's documented
   `apply_pca_obs` implementation.
 
@@ -159,42 +123,82 @@ metrics. Existing reports and output recordings are never overwritten.
 
 ## Metrics and scientific limits
 
-Two properties of the report metrics have to be kept in mind when the arms are
-read against each other:
+### Saved-output correction and comparison reports (profile schema 2)
 
-- **Alpha collateral is an upper bound on signal loss, not a measurement of
-  it.** It is the non-heartbeat-locked part of the removal, in the alpha band.
-  Cardiac artifact is not strictly phase-locked -- its amplitude varies with
-  respiration and head motion -- and it carries power throughout the alpha band,
-  so a method that correctly tracks that variation books the tracked variation
-  as collateral. The statistic cannot separate genuine signal loss from
-  correctly-tracked artifact variability. The spatial check does not rescue it:
-  the correlation between an arm's collateral map and the alpha map is
-  scale-invariant, and runs 0.86 to 0.95 for every arm including the one that
-  removes 0.85% of the alpha, so shape carries no information and only magnitude
-  does. Only a known-signal injection settles it, and that has been run for
-  blocked mean alone (gain error 0.0006, cosine similarity 0.999).
-- **The locked ratio, specificity, and alpha-collateral fraction are measured
-  on ECG-regressed posterior EEG.** Regressing the ECG channel out before
-  measuring is what stops volume-conducted QRS from being counted as BCG, but it
-  also makes the metrics blind to anything a method leaves in the file that is
-  collinear with the ECG channel. The blocked-mean defect above sat exactly in
-  that blind spot for a day. The report pages therefore also print the locked
-  ratio measured on the EEG as written, without regression; a gap between the
-  two is ECG-shaped residual the user will see in the file.
-- **Specificity and the collateral fraction are structurally near their best
-  values for any method that subtracts a beat-invariant template.** Both are
-  defined from the part of the removal that is *not* phase-locked to the
-  heartbeat. A fixed template, subtracted at every beat, removes almost nothing
-  non-locked whatever its shape, so a fixed template that was too large or
-  misplaced would still score a specificity near 1 and a collateral fraction
-  near 0. These two numbers therefore measure how *adaptive* a method is, and
-  they penalise a method that correctly tracks beat-to-beat amplitude exactly as
-  they penalise one that removes brain. They separate a correction from an
-  aggressive filter; they do not on their own show that a non-adaptive method is
-  right. That is what the known-signal transfer test in
-  `tools/experiment_blocked_mean_robustness.py` is for, and it has so far been
-  run for the blocked-mean arm only.
+For each recording and EEG channel, subtract its recording-level median.
+Use the same original ECG peaks, delay-centred window, and complete epochs for
+every arm. Primary measurements use the EEG as written; a separately labelled
+sensitivity view regresses each trace against the same original ECG reference.
+The difference between those views is not a uniquely identified cardiac field.
+
+At resolution K, divide complete epochs chronologically into K near-equal
+groups. For channel c, let m(c,b,t) be the mean within block b and n(b) its
+beat count. Compute:
+
+```text
+local_RMS(c) = sqrt(sum_b n(b) * mean_t(m(c,b,t)^2) / sum_b n(b))
+ratio = median_c(local_RMS_after(c)) / median_c(local_RMS_before(c))
+```
+
+Squaring before pooling prevents opposing block errors or channel polarities
+from cancelling. The shipped K = 2/5/10/20 and minimum eight beats per block
+come from the exploratory cancellation audit, not a validation of their
+optimality. More blocks raise the finite-sample noise floor. No resolution is
+an artifact-only measurement or a held-out test. Unsupported resolutions and
+zero-denominator ratios are explicitly unavailable.
+
+Pooled template curves are descriptive only. Waveform panels summarize
+squared amplitudes across channels; scalar ratios use channel medians.
+Removal phase-locking specificity is a descriptive energy fraction, not neural
+specificity. Beat-variable removal can be variable artifact, neural signal, or
+both; it is not even a guaranteed upper bound on neural loss, because
+heartbeat-locked neural activity can also be removed. Spatial similarity to
+alpha topography does not resolve that ambiguity.
+
+The spectral locking fraction is computed within each recording by summing
+locked and variable removal powers over the same EEG channels, then dividing.
+Only those per-recording fractions enter participant aggregation; dividing
+cohort-aggregated powers would give high-removal participants extra weight.
+
+Welch spectra are calculated within individual epochs and averaged across
+epochs, never over concatenated discontinuities. Density is integrated over
+frequency for band-power units. Bands with insufficient frequency bins remain
+undefined. Total band power in CSV exports is descriptive only and drives no
+quality flag or method preference.
+
+Subject and cohort comparison pages use the intersection of recording
+identities across the compared arms. Cohort summaries first average within
+participant, then take participant medians. IQR bars describe participant
+variation, not inferential confidence intervals. Unsupported measurements
+propagate as unavailable rather than changing the contributing sample.
+Coverage includes missing outputs and unavailable profiles, not inferred
+correction failures.
+
+If there is no paired cohort, rebuilding fails explicitly rather than leaving
+old figures looking current. An unpairable subject with an existing report also
+raises a stale-report error; files are not silently deleted.
+
+Every arm reports `preservation_status=not_measured`. A zeroed signal achieves
+zero residual but does not thereby preserve brain activity. Preservation
+comparisons require matched fitting/evaluation protocols: frozen BCGNet
+injection transfer cannot be ranked against refitted bounded corrections.
+Data already used for tuning remain exploratory, including after changing
+the metrics. No automatic winner or residual rejection gate is warranted.
+
+`bcg reports` recomputes profiles from the original FASTR and existing corrected
+files without running any correction or network. Old profile schemas are
+rejected. Single-method cohort pages consume the rebuilt profiles, not EEG.
+
+Implementation references: [MNE PCA-OBS example](https://mne.tools/stable/auto_examples/preprocessing/esg_rm_heart_artefact_pcaobs.html),
+[SciPy Welch estimator](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html),
+and [scikit-learn grouped evaluation](https://scikit-learn.org/stable/modules/cross_validation.html#cross-validation-iterators-for-grouped-data).
+The local-block diagnostic is this project's explicitly tested measurement,
+not a claim of endorsement or ground-truth validation by those packages.
+
+### Separate Analyzer benchmark
+
+The following describes the existing Analyzer agreement benchmark, not the
+saved-output comparison metrics above.
 
 The primary residual measure is held-out cardiac RMS: even beats are scored against an
 odd-beat template and odd beats against an even-beat template. The event being scored

@@ -2,7 +2,6 @@ paths:
   fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2
   aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v3_bcg
   pca_obs_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v3_pcaobs
-  blocked_mean_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v3_blockedmean
   bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcgnet
   output_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v3
   experiments_root: experiments_v3
@@ -11,7 +10,6 @@ compute:
 run:
   aas: false
   pca_obs: false
-  blocked_mean: false
   bcgnet: false
 bcgnet_config: config.yaml
 correction:
@@ -21,9 +19,9 @@ correction:
   ecg_to_bcg_delay_seconds: 0.21
   aas_neighbor_count: 20
   pca_obs_components: 2
-  cross_fit_fold_count: 10
-  maximum_residual_ratio: 0.5
-  residual_floor_uv: 5.0
+  evaluation:
+    block_counts: [2, 5, 10, 20]
+    minimum_beats_per_block: 8
   maximum_gap_fraction: 0.05
   overwrite: false
   detector:

@@ -3,7 +3,7 @@
 Subcommands are grouped by what they operate on rather than by which package
 implements them, so a user picks a *method*, not a module:
 
-    cohort      discover  aas  pca-obs  blocked-mean  bcgnet  compare
+    cohort      discover  aas  pca-obs  bcgnet  compare
     single      correct   detect  benchmark
 
 No method is privileged. ``bcg aas`` and ``bcg bcgnet`` are siblings, which is
@@ -132,8 +132,14 @@ def _compare(arguments: argparse.Namespace) -> int:
     from bcgnet.compare.config import load_compare_config
     from bcgnet.compare.pipeline import run_comparison
 
-    rows = run_comparison(load_compare_config(arguments.config))
-    print(f"COMPARE DONE recordings={len(rows)}")
+    plots_only = getattr(arguments, "plots_only", False)
+    rows = run_comparison(
+        load_compare_config(arguments.config), plots_only=plots_only
+    )
+    if plots_only:
+        print("COMPARE DONE plots_only=True")
+    else:
+        print(f"COMPARE DONE recordings={len(rows)}")
     return 0
 
 
@@ -160,8 +166,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bcg",
         description=(
-            "Ballistocardiogram correction for EEG-fMRI. Four methods on equal "
-            "footing -- AAS, PCA-OBS, blocked mean, BCGNet -- plus a "
+            "Ballistocardiogram correction for EEG-fMRI. Three methods on equal "
+            "footing -- AAS, PCA-OBS, BCGNet -- plus a "
             "comparison between them."
         ),
     )
@@ -180,11 +186,6 @@ def _make_parser() -> argparse.ArgumentParser:
         (
             "pca-obs",
             "correct every recording with the optimal basis set",
-            "compare.yaml",
-        ),
-        (
-            "blocked-mean",
-            "correct every recording with the cross-fitted blocked mean template",
             "compare.yaml",
         ),
         (
@@ -221,6 +222,15 @@ def _make_parser() -> argparse.ArgumentParser:
             required=True,
             help=f"path to the YAML configuration, e.g. {example}",
         )
+        if name == "compare":
+            sub.add_argument(
+                "--plots-only",
+                action="store_true",
+                help=(
+                    "rebuild comparative plots from cached profiles without "
+                    "re-reading EEG"
+                ),
+            )
     return parser
 
 

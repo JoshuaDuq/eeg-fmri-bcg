@@ -12,6 +12,7 @@ import yaml
 
 from .bcg import METHODS
 from .config import ConfigurationError
+from .evaluation import EvaluationSettings, parse_evaluation
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,18 +53,7 @@ class CorrectionRunConfig:
     ecg_to_bcg_delay_seconds: float
     aas_neighbor_count: int
     pca_obs_components: int
-    #: Contiguous held-out blocks for ``blocked_mean``. Ten is the value the
-    #: fold sweep found flat from five folds upward, so it is a plateau rather
-    #: than a tuned choice.
-    cross_fit_fold_count: int
-    #: Calibrated at one sampling rate: the locked ratio rises with rate, so
-    #: the same recording is judged more harshly at a higher one.
-    maximum_residual_ratio: float
-    #: Absolute heartbeat-locked residual (uV) below which
-    #: ``maximum_residual_ratio`` no longer gates output. A recording that
-    #: started with little locked energy cannot halve it, however well the
-    #: correction worked.
-    residual_floor_uv: float
+    evaluation: EvaluationSettings
     #: Largest share of a recording that may sit inside RR gaps. Inside a gap
     #: no template is subtracted, so that span keeps full-amplitude BCG and is
     #: marked bad in the output. Above this share the detected beats cannot be
@@ -86,7 +76,6 @@ class BenchmarkConfig:
     ecg_to_bcg_delay_seconds: float
     aas_neighbor_count: int
     pca_obs_components: int
-    cross_fit_fold_count: int
     null_surrogate_count: int
     random_seed: int
 
@@ -102,9 +91,7 @@ _CORRECTION_KEYS = frozenset(
         "ecg_to_bcg_delay_seconds",
         "aas_neighbor_count",
         "pca_obs_components",
-        "cross_fit_fold_count",
-        "maximum_residual_ratio",
-        "residual_floor_uv",
+        "evaluation",
         "maximum_gap_fraction",
     }
 )
@@ -121,7 +108,6 @@ _BENCHMARK_KEYS = frozenset(
         "ecg_to_bcg_delay_seconds",
         "aas_neighbor_count",
         "pca_obs_components",
-        "cross_fit_fold_count",
         "null_surrogate_count",
         "random_seed",
     }
@@ -448,21 +434,7 @@ def load_correction_config(path: str | Path) -> CorrectionRunConfig:
             "pca_obs_components",
             minimum=1,
         ),
-        cross_fit_fold_count=_integer(
-            correction_values,
-            "cross_fit_fold_count",
-            minimum=2,
-        ),
-        maximum_residual_ratio=_number(
-            correction_values,
-            "maximum_residual_ratio",
-            minimum=0.0,
-            maximum=1.0,
-        ),
-        residual_floor_uv=_nonnegative_number(
-            correction_values,
-            "residual_floor_uv",
-        ),
+        evaluation=parse_evaluation(correction_values["evaluation"]),
         maximum_gap_fraction=_number(
             correction_values,
             "maximum_gap_fraction",
@@ -517,11 +489,6 @@ def load_benchmark_config(path: str | Path) -> BenchmarkConfig:
             benchmark_values,
             "pca_obs_components",
             minimum=1,
-        ),
-        cross_fit_fold_count=_integer(
-            benchmark_values,
-            "cross_fit_fold_count",
-            minimum=2,
         ),
         null_surrogate_count=_integer(
             benchmark_values,

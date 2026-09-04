@@ -97,11 +97,10 @@ def test_candidate_sweep_keeps_neighbors_and_adds_all_ridge_models() -> None:
 
     sweep = candidates(prepared, experiment)
 
-    assert len(sweep) == 39
+    assert len(sweep) == 38
     assert sum(candidate.aggregator == "weighted" for candidate in sweep) == 15
     assert sum(candidate.aggregator == "median" for candidate in sweep) == 3
     assert sum(candidate.aggregator == "ridge" for candidate in sweep) == 20
-    assert sum(candidate.aggregator == "mean" for candidate in sweep) == 1
     assert {
         candidate.ridge_penalty
         for candidate in sweep
@@ -303,8 +302,8 @@ def test_metric_audit_plot_compares_explicit_variants(tmp_path) -> None:
     output = tmp_path / "audit.png"
     rows = [
         {
-            "method": "blocked_mean",
-            "family": "blocked_mean",
+            "method": "aas",
+            "family": "aas",
             "aggregator": "mean",
             "direct_locked_ratio_median": 0.3,
             "reference_orthogonalized_locked_ratio_median": 0.2,

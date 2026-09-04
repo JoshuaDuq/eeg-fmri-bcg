@@ -113,18 +113,6 @@ def _validate_frequency(frequency: float, sampling_rate: float) -> None:
         raise MetricInputError("frequency must stay below the Nyquist frequency")
 
 
-def _validate_band(low: float, high: float, sampling_rate: float) -> None:
-    _validate_frequency(high, sampling_rate)
-    if (
-        isinstance(low, bool)
-        or not isinstance(low, Real)
-        or not math.isfinite(float(low))
-        or low < 0.0
-        or low >= high
-    ):
-        raise MetricInputError("the band must be positive and increasing")
-
-
 def _validate_triggers(
     triggers: npt.ArrayLike,
     *,
@@ -314,11 +302,6 @@ def _project(basis: np.ndarray, signal: np.ndarray) -> complex:
     return complex(coefficients[0], coefficients[1])
 
 
-def _band_power(signal: np.ndarray, inside: np.ndarray) -> float:
-    spectrum = np.fft.rfft(signal)
-    return float(np.sum(np.abs(spectrum[inside]) ** 2))
-
-
 def regress_out_reference(
     data: npt.ArrayLike,
     reference: npt.ArrayLike,
@@ -439,29 +422,6 @@ def tone_transfer(
     )
 
 
-def band_rms_ratio(
-    injected: npt.ArrayLike,
-    corrected: npt.ArrayLike,
-    *,
-    low: float,
-    high: float,
-    sampling_rate: float,
-) -> float:
-    """Measure the RMS a correction kept inside one frequency band."""
-    reference = _validate_signal(injected, name="injected")
-    result = _validate_signal(corrected, name="corrected")
-    if reference.size != result.size:
-        raise MetricInputError("injected and corrected must have the same length")
-    _validate_band(low, high, sampling_rate)
-
-    frequencies = np.fft.rfftfreq(reference.size, d=1.0 / sampling_rate)
-    inside = (frequencies >= low) & (frequencies <= high)
-    reference_power = _band_power(reference, inside)
-    if reference_power == 0.0:
-        raise MetricInputError("the injected signal has no energy in this band")
-    return math.sqrt(_band_power(result, inside) / reference_power)
-
-
 def trigger_locked_rms(
     data: npt.ArrayLike,
     triggers: npt.ArrayLike,
@@ -570,39 +530,6 @@ def estimate_ecg_to_bcg_delay(
         delays_seconds=RECORDING_DELAY_GRID_SECONDS,
         window_seconds=RECORDING_DELAY_WINDOW_SECONDS,
     )
-
-
-def event_locked_rms_ratio(
-    injected: npt.ArrayLike,
-    corrected: npt.ArrayLike,
-    event_starts: npt.ArrayLike,
-    *,
-    epoch_samples: int,
-) -> float:
-    """Measure event-locked RMS transfer using fractional event positions."""
-    reference = _validate_signal(injected, name="injected")
-    result = _validate_signal(corrected, name="corrected")
-    if reference.size != result.size:
-        raise MetricInputError("injected and corrected must have the same length")
-    positions = _validate_triggers(
-        event_starts,
-        epoch_samples=epoch_samples,
-        sample_count=reference.size,
-    )
-    reference_epochs = _extract_fractional_epochs(
-        reference[np.newaxis, :],
-        positions,
-        epoch_samples,
-    )[0]
-    result_epochs = _extract_fractional_epochs(
-        result[np.newaxis, :],
-        positions,
-        epoch_samples,
-    )[0]
-    reference_rms = np.sqrt(np.mean(reference_epochs.mean(axis=0) ** 2))
-    if reference_rms == 0.0:
-        raise MetricInputError("the injected event has no event-locked energy")
-    return float(np.sqrt(np.mean(result_epochs.mean(axis=0) ** 2)) / reference_rms)
 
 
 def held_out_cardiac_rms(

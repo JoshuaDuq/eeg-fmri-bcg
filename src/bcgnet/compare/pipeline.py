@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
+from collections import Counter
 from pathlib import Path
 
 import matplotlib
@@ -17,10 +19,10 @@ from .comparative import save_comparative_report
 from .config import CompareConfig
 from .pairs import RecordingSet, pair_recordings
 from .plots import (
-    METRIC_COLUMNS,
     RAW_LABEL,
-    detector_provenance,
     load_fastr,
+    measure_recording,
+    metric_columns,
     metrics_row,
 )
 
@@ -50,151 +52,208 @@ def _run_requested_arms(config: CompareConfig) -> None:
 
 
 def _load_traces(recording: RecordingSet) -> dict:
-    traces = {}
+    traces = {RAW_LABEL: load_fastr(recording.fastr_vhdr)}
     try:
-        traces[RAW_LABEL] = load_fastr(recording.fastr_vhdr)
-    except Exception as error:
-        print(f"failed to load FASTR {recording.fastr_vhdr}: {error}")
-        return traces
-    for arm in CLEAN_ARMS:
-        vhdr = recording.cleaned_vhdr.get(arm.key)
-        if vhdr is None:
-            continue
-        try:
-            traces[arm.label] = load_fastr(vhdr)
-        except Exception as error:
-            print(f"failed to load {arm.label} {vhdr}: {error}")
+        for arm in CLEAN_ARMS:
+            if arm.key in recording.cleaned_vhdr:
+                traces[arm.label] = load_fastr(recording.cleaned_vhdr[arm.key])
+    except Exception:
+        for raw in traces.values():
+            raw.close()
+        raise
     return traces
 
 
-def _collect_profiles(recording, traces, profiles) -> None:
-    from bcg_correction.correction_report import compute_correction_profile
-
-    provenance = detector_provenance(recording)
-    if provenance is None:
-        return
-    raw = traces[RAW_LABEL]
-    if "ECG" not in raw.ch_names:
-        return
-    for arm in CLEAN_ARMS:
-        cleaned = traces.get(arm.label)
-        if cleaned is None or cleaned.n_times != raw.n_times:
-            continue
-        profile = compute_correction_profile(
-            raw.get_data(),
-            cleaned.get_data(),
-            tuple(raw.ch_names),
-            ecg_channel_index=raw.ch_names.index("ECG"),
-            peak_samples=provenance.peak_samples,
-            sampling_rate_hz=float(raw.info["sfreq"]),
-            delay_seconds=provenance.delay_seconds,
-            window_seconds=provenance.window_seconds,
-            gap_fraction=provenance.gap_fraction,
-            method=arm.key,
-            label=recording.label,
-        )
-        if profile is not None:
-            profiles.setdefault(recording.bids_id, {}).setdefault(
-                arm.key, []
-            ).append(profile)
+def paired_profiles(groups):
+    """Intersect recording identities before any subject/cohort summary."""
+    keyed = {}
+    for key, items in groups.items():
+        indexed = {(p.subject, p.label): p for p in items}
+        if len(indexed) != len(items):
+            raise ValueError(f"duplicate recording profile for {key}")
+        keyed[key] = indexed
+    common = (
+        set.intersection(*(set(items) for items in keyed.values())) if keyed else set()
+    )
+    return {
+        key: [items[identity] for identity in sorted(common)]
+        for key, items in keyed.items()
+    }
 
 
 def _write_experiments(
-    experiments_root: Path, profiles: dict, *, offered: int
+    experiments_root: Path, profiles: dict, *, offered: dict[str, int]
 ) -> None:
-    if not profiles:
-        return
-    keyed: dict[str, dict[tuple[str, str], object]] = {}
-    for bids_id, by_arm in sorted(profiles.items()):
-        save_comparative_report(
-            by_arm,
-            title=f"{bids_id}  \u2014  correction methods compared",
-            output=experiments_root / "subjects" / f"{bids_id}_comparative.png",
-        )
-        for key, items in by_arm.items():
-            for profile in items:
-                keyed.setdefault(key, {})[(bids_id, profile.label)] = profile
+    from bcg_correction.correction_report import (
+        report_page_paths,
+        save_topography_report,
+    )
 
-    produced = {key: len(items) for key, items in keyed.items()}
-    common: set[tuple[str, str]] = set.intersection(
-        *(set(items) for items in keyed.values())
-    ) if keyed else set()
-    cohort = {
-        key: [items[recording] for recording in sorted(common)]
-        for key, items in keyed.items()
+    active = [
+        arm.key
+        for arm in CLEAN_ARMS
+        if any(arm.key in groups for groups in profiles.values())
+    ]
+    if not active:
+        if offered or any(experiments_root.glob("cohort_*.*")):
+            raise ValueError(
+                "no evaluable profiles; reports not rebuilt, old files are stale"
+            )
+        return
+    all_profiles = {
+        key: [p for groups in profiles.values() for p in groups.get(key, [])]
+        for key in active
     }
-    dropped = {key: n - len(common) for key, n in produced.items()}
-    for key, count in sorted(dropped.items()):
-        if count:
-            print(f"cohort pairing: {key} drops {count} unpaired recording(s)")
+    cohort = paired_profiles(all_profiles)
+    reference = next(iter(cohort.values()))
+    if not reference:
+        raise ValueError(
+            "no paired cohort profiles; reports not rebuilt, old files are stale"
+        )
+    subject_reports = []
+    for bids_id in sorted(offered):
+        selected = {key: profiles.get(bids_id, {}).get(key, []) for key in active}
+        paired = paired_profiles(selected)
+        output = experiments_root / "subjects" / f"{bids_id}_comparative.png"
+        if not any(paired.values()):
+            stale = [output, output.with_suffix(".pdf")]
+            stale.extend(
+                path
+                for page in report_page_paths(output).values()
+                for path in (page, page.with_suffix(".pdf"))
+            )
+            if any(path.exists() for path in stale):
+                raise ValueError(
+                    f"no paired profiles for {bids_id}; reports not rebuilt, "
+                    f"existing files are stale: {output}"
+                )
+            print(f"no paired profiles for {bids_id}; no subject page produced")
+            continue
+        subject_reports.append(
+            (
+                bids_id,
+                paired,
+                output,
+                {key: offered[bids_id] - len(items) for key, items in selected.items()},
+            )
+        )
+    for bids_id, paired, output, coverage in subject_reports:
+        save_comparative_report(
+            paired,
+            title=f"{bids_id} — paired correction comparison",
+            output=output,
+            coverage=coverage,
+        )
+    subjects = len({p.subject for p in reference})
+    title = f"Cohort — {len(reference)} paired recordings, {subjects} participants"
+    coverage = {
+        arm.key: sum(offered.values()) - len(all_profiles.get(arm.key, []))
+        for arm in CLEAN_ARMS
+    }
     save_comparative_report(
         cohort,
-        title=(
-            f"Cohort  \u2014  correction methods compared, "
-            f"{len(common)} paired recordings, {len(profiles)} subjects"
-        ),
+        title=title,
         output=experiments_root / "cohort_comparative.png",
-        coverage={key: offered - n for key, n in produced.items()},
+        coverage=coverage,
     )
-    from bcg_correction.correction_report import save_topography_report
-
-    from .arms import CLEAN_ARMS as _ARMS
-
     save_topography_report(
-        {arm.label: cohort[arm.key] for arm in _ARMS if cohort.get(arm.key)},
-        title=(
-            f"Cohort  \u2014  where each method acts, "
-            f"{len(common)} paired recordings, {len(profiles)} subjects"
-        ),
+        {arm.label: cohort[arm.key] for arm in CLEAN_ARMS if cohort.get(arm.key)},
+        title=title,
         output=experiments_root / "cohort_topography.png",
+    )
+    print(
+        f"paired cohort: {len(reference)}/{sum(offered.values())} recordings, "
+        f"{subjects} participants"
     )
     print(f"experiments written to {experiments_root}")
 
 
-def _write_summary(output_root: Path, rows: list[dict]) -> None:
+def _write_summary(output_root: Path, rows: list[dict], evaluation) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     json_path = output_root / "compare_summary.json"
     csv_path = output_root / "compare_summary.csv"
-    json_path.write_text(json.dumps(rows, indent=2))
+    json_path.write_text(json.dumps(rows, indent=2, allow_nan=False))
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=METRIC_COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=metric_columns(evaluation))
         writer.writeheader()
         writer.writerows(rows)
 
 
-def compare_existing_outputs(config: CompareConfig) -> list[dict]:
+def compare_existing_outputs(
+    config: CompareConfig, *, plots_only: bool = False
+) -> list[dict]:
+    cache_path = config.paths.output_root / "compare_profiles.pkl"
+    if plots_only:
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"No cached profiles found at {cache_path}. "
+                "Run a full comparison first to generate the profile cache."
+            )
+        import pickle
+
+        with cache_path.open("rb") as handle:
+            cached = pickle.load(handle)
+        _write_experiments(
+            config.paths.experiments_root,
+            cached["profiles"],
+            offered=cached["offered"],
+        )
+        return cached.get("rows", [])
+
     recordings = pair_recordings(config)
-    rows: list[dict] = []
-    profiles: dict[str, dict[str, list]] = {}
+    rows = []
+    profiles = {}
+    evaluation = config.correction.evaluation
     for recording in recordings:
         traces = _load_traces(recording)
-        if RAW_LABEL not in traces:
-            continue
-        present = [arm.label for arm in CLEAN_ARMS if arm.label in traces]
-        if not present:
-            print(f"skip {recording.bids_id} {recording.stem}: no cleaned files")
-            continue
-        rows.append(
-            metrics_row(
-                recording,
-                traces,
-                max_hz=config.plot.psd_max_hz,
+        try:
+            measured = measure_recording(recording, traces, evaluation)
+            rows.append(
+                metrics_row(
+                    recording,
+                    traces,
+                    measured,
+                    max_hz=config.plot.psd_max_hz,
+                    evaluation=evaluation,
+                )
             )
-        )
-        _collect_profiles(recording, traces, profiles)
+            for key, profile in measured.items():
+                profiles.setdefault(recording.bids_id, {}).setdefault(key, []).append(
+                    profile
+                )
+            print(
+                f"compared {recording.bids_id} {recording.label} "
+                f"profiles={len(measured)}"
+            )
+        finally:
+            for raw in traces.values():
+                raw.close()
+    _write_summary(config.paths.output_root, rows, evaluation)
+    offered = dict(Counter(recording.bids_id for recording in recordings))
+    import pickle
+
+    try:
+        config.paths.output_root.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as handle:
+            pickle.dump(
+                {"profiles": profiles, "offered": offered, "rows": rows},
+                handle,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+    except Exception as err:
         print(
-            f"compared {recording.bids_id} {recording.label} "
-            f"arms={'+'.join(present)}"
+            f"warning: could not cache comparison profiles: {err}",
+            file=sys.stderr,
         )
-    _write_summary(config.paths.output_root, rows)
     _write_experiments(
         config.paths.experiments_root,
         profiles,
-        offered=len(recordings),
+        offered=offered,
     )
     return rows
 
 
-def run_comparison(config: CompareConfig) -> list[dict]:
-    _run_requested_arms(config)
-    return compare_existing_outputs(config)
+def run_comparison(config: CompareConfig, *, plots_only: bool = False) -> list[dict]:
+    if not plots_only:
+        _run_requested_arms(config)
+    return compare_existing_outputs(config, plots_only=plots_only)

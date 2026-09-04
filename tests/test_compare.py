@@ -3,35 +3,37 @@ from pathlib import Path
 
 import pytest
 
-from bcgnet.compare.arms import AAS, BCGNET, BLOCKED_MEAN, PCA_OBS
+from bcg_correction.evaluation import EvaluationSettings
+from bcgnet.compare.arms import AAS, BCGNET, PCA_OBS
 from bcgnet.compare.config import load_compare_config
 from bcgnet.compare.pairs import bcgnet_output_vhdr, pair_recordings
 from bcgnet.config import ConfigurationError
 from bcgnet.export import bcgnet_output_vhdr as export_bcgnet_output_vhdr
+
+_EVALUATION = EvaluationSettings((2, 5, 10, 20), 8)
 
 _HEADER = "Brain Vision Data Exchange Header File Version 1.0\n" + ("x" * 120)
 
 _ARM_FILENAME = {
     "aas": "BaselineEEG_sub0000_fastr_aas.vhdr",
     "pca_obs": "BaselineEEG_sub0000_fastr_pcaobs.vhdr",
-    "blocked_mean": "BaselineEEG_sub0000_fastr_blockedmean.vhdr",
     "bcgnet": "BaselineEEG_sub0000_fastr_bcgnet.vhdr",
 }
 
 
 def test_empty_summary_replaces_stale_csv_with_current_header(tmp_path: Path) -> None:
     from bcgnet.compare.pipeline import _write_summary
-    from bcgnet.compare.plots import METRIC_COLUMNS
+    from bcgnet.compare.plots import metric_columns
 
     output = tmp_path / "out"
     output.mkdir()
     csv_path = output / "compare_summary.csv"
     csv_path.write_text("stale,data\n1,2\n", encoding="utf-8")
 
-    _write_summary(output, [])
+    _write_summary(output, [], _EVALUATION)
 
     with csv_path.open(encoding="utf-8", newline="") as handle:
-        assert list(csv.reader(handle)) == [list(METRIC_COLUMNS)]
+        assert list(csv.reader(handle)) == [list(metric_columns(_EVALUATION))]
 
 
 def test_compare_existing_outputs_never_generates_an_arm(
@@ -41,9 +43,7 @@ def test_compare_existing_outputs_never_generates_an_arm(
 
     config_path = _write_compare_yaml(tmp_path, arms=())
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "aas: false", "aas: true"
-        ),
+        config_path.read_text(encoding="utf-8").replace("aas: false", "aas: true"),
         encoding="utf-8",
     )
     config = load_compare_config(config_path)
@@ -52,6 +52,8 @@ def test_compare_existing_outputs_never_generates_an_arm(
         raise AssertionError("report rebuilding must not run a correction")
 
     monkeypatch.setattr(pipeline, "run_correction_batch", fail)
+    # This is an orchestration test, not a test of the intentionally dummy header.
+    monkeypatch.setattr(pipeline, "pair_recordings", lambda config: [])
 
     assert pipeline.compare_existing_outputs(config) == []
 
@@ -80,23 +82,21 @@ paths:
   fastr_root: {tmp_path / "fastr"}
   aas_root: {tmp_path / "aas"}
   pca_obs_root: {tmp_path / "pca_obs"}
-  blocked_mean_root: {tmp_path / "blocked_mean"}
   bcgnet_root: {tmp_path / "bcgnet"}
   output_root: {tmp_path / "out"}
   experiments_root: {tmp_path / "experiments"}
 {compute}run:
   aas: false
   pca_obs: false
-  blocked_mean: false
   bcgnet: false
 correction:
   window_seconds: [-0.2, 0.7]
   ecg_to_bcg_delay_seconds: 0.21
   aas_neighbor_count: 20
   pca_obs_components: 4
-  cross_fit_fold_count: 2
-  maximum_residual_ratio: 0.5
-  residual_floor_uv: 5.0
+  evaluation:
+    block_counts: [2, 5, 10, 20]
+    minimum_beats_per_block: 8
   maximum_gap_fraction: 0.05
   overwrite: false
   detector:
@@ -156,12 +156,6 @@ def test_pca_obs_is_read_from_its_own_root(tmp_path: Path) -> None:
     assert config.paths.root_for(PCA_OBS) == (tmp_path / "pca_obs").resolve()
     assert config.paths.root_for(AAS) == (tmp_path / "aas").resolve()
     assert config.paths.root_for(BCGNET) == (tmp_path / "bcgnet").resolve()
-
-
-def test_blocked_mean_is_read_from_its_own_root(tmp_path: Path) -> None:
-    config = load_compare_config(_write_compare_yaml(tmp_path, arms=()))
-
-    assert config.paths.root_for(BLOCKED_MEAN) == (tmp_path / "blocked_mean").resolve()
 
 
 def test_compare_config_rejects_the_superseded_aas_block(tmp_path: Path) -> None:
@@ -255,11 +249,10 @@ def test_compare_config_requires_a_compute_block(
     ("old", "new", "message"),
     [
         ("pca_obs_components: 4", "pca_obs_components: -3", "pca_obs_components"),
-        ("cross_fit_fold_count: 2", "cross_fit_fold_count: 1", "cross_fit_fold_count"),
         (
-            "maximum_residual_ratio: 0.5",
-            "maximum_residual_ratio: .nan",
-            "maximum_residual_ratio",
+            "maximum_gap_fraction: 0.05",
+            "maximum_gap_fraction: .nan",
+            "maximum_gap_fraction",
         ),
         (
             "correlation_threshold: 0.5",
@@ -303,35 +296,37 @@ def _profile(key: str, ratio: float, spec: float, alpha: float):
     return CorrectionProfile(
         method=key,
         label="run1",
-        template_before=wave,
-        template_after=wave,
-        removed_locked=wave,
-        psd_before=spectrum,
-        psd_after=spectrum,
-        psd_present=spectrum,
-        psd_removed_locked=spectrum,
-        psd_removed_nonlocked=spectrum,
-        excerpt_seconds=np.arange(10.0),
-        excerpt_before=np.zeros(10),
-        excerpt_after=np.zeros(10),
-        channel_names=np.asarray(["Oz", "Pz", "Cz", "Fz"], dtype="<U16"),
-        topo_artifact=np.arange(4.0),
-        topo_alpha_present=np.arange(4.0),
-        topo_removed_locked=np.arange(4.0),
-        topo_collateral_alpha=np.arange(4.0),
-        locked_ratio=ratio,
-        locked_before_uv=10.0,
-        locked_after_uv=10.0 * ratio,
-        specificity=spec,
-        alpha_collateral_fraction=alpha,
-        beats=100,
-        heart_rate_bpm=60.0,
+        subject="s1",
+        preservation_status="not_measured",
+        block_counts=np.array([2, 5, 10, 20]),
+        window_seconds=np.array([-0.2, 0.7]),
+        minimum_beats_per_block=8,
+        block_minimum_beats=np.array([100, 40, 20, 10]),
+        beats=200,
         applied_delay_seconds=0.21,
-        gap_fraction=0.0,
+        gap_fraction=0,
+        sampling_rate_hz=100,
+        channel_names=np.array(["Oz", "Pz", "Cz", "Fz"]),
+        local_before_uv=np.full((2, 4), 10.0),
+        local_after_uv=np.full((2, 4), 10 * ratio),
+        local_ratio=np.full((2, 4), ratio),
+        pooled_before=wave,
+        pooled_after=wave,
+        local_wave_before=np.tile(wave, (4, 1)),
+        local_wave_after=np.tile(wave, (4, 1)),
+        psd_removed_locked=spectrum,
+        psd_removed_variable=spectrum,
+        phase_locking_spectrum=spectrum * spec,
+        locked_removal_fraction=spec,
+        variable_removal_alpha_ratio=alpha,
+        topo_before=np.ones((4, 4)),
+        topo_after=np.ones((4, 4)) * ratio,
+        topo_variable_alpha_ratio=np.full(4, alpha),
     )
 
 
 def test_comparative_report_draws_every_arm(tmp_path) -> None:
+    from bcg_correction.correction_report import report_page_paths
     from bcgnet.compare.comparative import save_comparative_report
 
     output = tmp_path / "cohort.png"
@@ -344,11 +339,15 @@ def test_comparative_report_draws_every_arm(tmp_path) -> None:
         title="three arms",
         output=output,
     )
-    assert output.stat().st_size > 10_000
+    pages = report_page_paths(output)
+    assert pages.keys() == {"residual", "spectra", "ratios"}
+    for page in pages.values():
+        assert page.stat().st_size > 10_000
 
 
 def test_comparative_report_handles_a_single_arm(tmp_path) -> None:
     """Running one method must still produce a page."""
+    from bcg_correction.correction_report import report_page_paths
     from bcgnet.compare.comparative import save_comparative_report
 
     output = tmp_path / "one.png"
@@ -357,7 +356,7 @@ def test_comparative_report_handles_a_single_arm(tmp_path) -> None:
         title="one arm",
         output=output,
     )
-    assert output.is_file()
+    assert all(path.is_file() for path in report_page_paths(output).values())
 
 
 def test_comparative_report_declines_when_no_arm_ran(tmp_path) -> None:
@@ -444,6 +443,7 @@ def test_cohort_pairs_arms_onto_their_common_recordings() -> None:
 def test_comparative_report_reports_each_arm_s_failures(tmp_path) -> None:
     """``coverage`` carries what each arm attempted, so the page can show that an
     arm is missing recordings rather than silently omitting them."""
+    from bcg_correction.correction_report import report_page_paths
     from bcgnet.compare.comparative import save_comparative_report
 
     output = tmp_path / "paired.png"
@@ -456,7 +456,8 @@ def test_comparative_report_reports_each_arm_s_failures(tmp_path) -> None:
         output=output,
         coverage={"aas": 6, "pca_obs": 1},
     )
-    assert output.stat().st_size > 10_000
+    pages = report_page_paths(output)
+    assert all(path.stat().st_size > 10_000 for path in pages.values())
 
 
 def test_fail_column_counts_failures_not_pairing_drops(tmp_path) -> None:
@@ -474,6 +475,8 @@ def test_fail_column_counts_failures_not_pairing_drops(tmp_path) -> None:
     assert coverage["aas"] > coverage["pca_obs"]
     assert coverage["aas"] != produced["aas"] - common
 
+    from bcg_correction.correction_report import report_page_paths
+
     output = tmp_path / "coverage.png"
     assert save_comparative_report(
         {
@@ -484,4 +487,49 @@ def test_fail_column_counts_failures_not_pairing_drops(tmp_path) -> None:
         output=output,
         coverage=coverage,
     )
-    assert output.stat().st_size > 10_000
+    pages = report_page_paths(output)
+    assert all(path.stat().st_size > 10_000 for path in pages.values())
+
+
+def test_compare_existing_outputs_plots_only_uses_cached_profiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import pickle
+
+    from bcgnet.compare.pipeline import compare_existing_outputs
+
+    config_path = _write_compare_yaml(tmp_path, arms=("aas",))
+    config = load_compare_config(config_path)
+
+    # Missing cache should raise FileNotFoundError.
+    with pytest.raises(FileNotFoundError, match="No cached profiles found"):
+        compare_existing_outputs(config, plots_only=True)
+
+    # With cache present, it should call _write_experiments and never call _load_traces.
+    cache_path = config.paths.output_root / "compare_profiles.pkl"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_profile = _profile("aas", 0.35, 0.85, 0.10)
+    with cache_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "profiles": {"sub-0000": {"aas": [fake_profile]}},
+                "offered": {"sub-0000": 1},
+                "rows": [{"test": 1}],
+            },
+            handle,
+        )
+
+    written = []
+    monkeypatch.setattr(
+        "bcgnet.compare.pipeline._write_experiments",
+        lambda root, profs, offered: written.append((root, profs, offered)),
+    )
+    monkeypatch.setattr(
+        "bcgnet.compare.pipeline._load_traces",
+        lambda r: pytest.fail("_load_traces should not be called with plots_only=True"),
+    )
+
+    rows = compare_existing_outputs(config, plots_only=True)
+    assert rows == [{"test": 1}]
+    assert len(written) == 1
+    assert "sub-0000" in written[0][1]

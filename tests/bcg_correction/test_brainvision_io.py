@@ -7,17 +7,14 @@ from pybv import write_brainvision
 
 from bcg_correction.brainvision import (
     BrainVisionMarker,
-    read_brainvision_markers,
     write_brainvision_markers,
 )
 from bcg_correction.brainvision_io import (
     BrainVisionInputError,
     read_brainvision_recording,
-    resample_markers,
     select_marker_samples,
     write_brainvision_recording,
 )
-from bcg_correction.window import OutputWindow
 
 
 def make_markers() -> tuple[BrainVisionMarker, ...]:
@@ -132,53 +129,6 @@ def test_select_marker_samples_rejects_missing_or_duplicate_positions() -> None:
         )
 
 
-def test_resample_markers_maps_positions_and_sizes_without_losing_fields() -> None:
-    markers = make_markers()
-
-    transformed = resample_markers(markers, factor=2)
-
-    assert transformed == (
-        BrainVisionMarker(
-            "New Segment",
-            "",
-            1,
-            1,
-            0,
-            "20260826123456123456",
-        ),
-        BrainVisionMarker("Volume", "volume-start", 1, 1, 0),
-        BrainVisionMarker("Comment", "comma, preserved", 251, 5, 2),
-        BrainVisionMarker("Volume", "volume-start", 451, 1, 0),
-    )
-
-
-def test_write_recording_reopens_in_mne_and_preserves_marker_descriptions(
-    tmp_path: Path,
-) -> None:
-    vhdr_path = tmp_path / "source.vhdr"
-    data = np.arange(2_000, dtype=np.float64).reshape(2, 1_000) * 1e-8
-    output_markers = resample_markers(make_markers(), factor=2)
-
-    write_brainvision_recording(
-        data=data[:, ::2],
-        sampling_rate=500.0,
-        channel_names=["EEG 001", "ECG"],
-        output_vhdr=vhdr_path,
-        markers=output_markers,
-    )
-
-    raw = mne.io.read_raw_brainvision(vhdr_path, preload=True, verbose="ERROR")
-    assert raw.info["sfreq"] == 500.0
-    assert raw.get_data().shape == (2, 500)
-    np.testing.assert_allclose(raw.get_data(), data[:, ::2], rtol=0.0, atol=1e-12)
-    _, markers = read_brainvision_markers(vhdr_path.with_suffix(".vmrk"))
-    assert markers == output_markers
-    assert set(raw.annotations.description) >= {
-        "Volume/volume-start",
-        "Comment/comma, preserved",
-    }
-
-
 def test_write_recording_refuses_existing_output_stem(tmp_path: Path) -> None:
     output = tmp_path / "result.vhdr"
     output.write_text("occupied", encoding="utf-8")
@@ -191,84 +141,6 @@ def test_write_recording_refuses_existing_output_stem(tmp_path: Path) -> None:
             output_vhdr=output,
             markers=(),
         )
-
-
-def test_resample_markers_shifts_positions_into_the_window() -> None:
-    markers = (
-        BrainVisionMarker("Volume", "V  1", position=101, size=1, channel=0),
-        BrainVisionMarker("Volume", "V  1", position=601, size=1, channel=0),
-    )
-
-    resampled = resample_markers(
-        markers,
-        factor=5,
-        window=OutputWindow(start=100, stop=1100),
-    )
-
-    assert [marker.position for marker in resampled] == [1, 101]
-
-
-def test_resample_markers_drops_markers_outside_the_window() -> None:
-    markers = (
-        BrainVisionMarker("Volume", "V  1", position=50, size=1, channel=0),
-        BrainVisionMarker("Volume", "V  1", position=101, size=1, channel=0),
-        BrainVisionMarker("Volume", "V  1", position=2000, size=1, channel=0),
-    )
-
-    resampled = resample_markers(
-        markers,
-        factor=5,
-        window=OutputWindow(start=100, stop=1100),
-    )
-
-    assert [marker.position for marker in resampled] == [1]
-
-
-def test_resample_markers_keeps_a_marker_on_each_window_boundary() -> None:
-    markers = (
-        BrainVisionMarker("Volume", "V  1", position=101, size=1, channel=0),
-        BrainVisionMarker("Volume", "V  1", position=200, size=1, channel=0),
-        BrainVisionMarker("Volume", "V  1", position=201, size=1, channel=0),
-    )
-
-    resampled = resample_markers(
-        markers,
-        factor=1,
-        window=OutputWindow(start=100, stop=200),
-    )
-
-    assert [marker.position for marker in resampled] == [1, 100]
-
-
-def test_resample_markers_without_a_window_is_unchanged() -> None:
-    markers = (BrainVisionMarker("Volume", "V  1", 101, 1, 0),)
-
-    assert resample_markers(markers, factor=5)[0].position == 21
-
-
-def test_resample_markers_preserves_fields_through_a_window() -> None:
-    markers = (
-        BrainVisionMarker(
-            "Stimulus",
-            "S  1",
-            position=301,
-            size=10,
-            channel=3,
-            date="20260209105307691816",
-        ),
-    )
-
-    resampled = resample_markers(
-        markers,
-        factor=5,
-        window=OutputWindow(start=100, stop=1100),
-    )
-
-    assert resampled[0].marker_type == "Stimulus"
-    assert resampled[0].description == "S  1"
-    assert resampled[0].size == 2
-    assert resampled[0].channel == 3
-    assert resampled[0].date == "20260209105307691816"
 
 
 def test_float_output_stores_microvolts_without_a_scale_factor(
