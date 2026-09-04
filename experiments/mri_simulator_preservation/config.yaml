@@ -1,0 +1,56 @@
+# Paired MRI-simulator vs scanner-corrected thermal 8-13 Hz response.
+# Simulator EEG is the outside-field reference and is not BCG-corrected.
+
+paths:
+  simulator_root: /Volumes/KINGSTON/EEG_fMRI_data/mri_simulator/source_data_sim
+  scanner_psychopy_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data
+  fastr_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2
+  aas_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcg
+  pca_obs_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_pcaobs
+  bcgnet_root: /Volumes/KINGSTON/EEG_fMRI_data/source_data/fastr_python_v2_bcgnet
+  compare_summary: /Volumes/KINGSTON/EEG_fMRI_data/source_data/bcg_compare_v2/compare_summary.csv
+  work_root: /Volumes/KINGSTON/EEG_fMRI_data/mri_simulator/thermal_response_work
+  output_root: results
+
+subjects:
+  include:
+    - sub-0010
+    - sub-0011
+    - sub-0015
+    - sub-0019
+    - sub-0020
+    - sub-0021
+  exclude:
+    - sub-0008
+
+# Documented thermode timing from the task config, not from looking at EEG.
+thermal:
+  runs: [1, 2, 3, 4, 5, 6]
+  n_triggers: 11
+  prestimulus_seconds: [-5.0, 0.0]
+  ramp_up_seconds: 3.0
+  hold_seconds: 7.5
+  posterior:
+    - P3
+    - P4
+    - Pz
+    - PO3
+    - PO4
+    - PO7
+    - PO8
+    - POz
+    - O1
+    - O2
+    - Oz
+  band_hz: [8.0, 13.0]
+  # A priori peak-to-peak reject on posterior channels; not 8-13 Hz.
+  peak_to_peak_uv: 200.0
+  welch_nperseg_seconds: 1.0
+
+preprocess:
+  target_hz: 1000
+  filter_hz: [1.0, 40.0]
+
+cardiac:
+  # Existing scanner comparison: 5 chronological blocks, ECG-regressed.
+  column_template: local_5_ecg_regressed_ratio_{method}
